@@ -49,7 +49,7 @@ func trustedStreamSource (ctx context.Context, address string) {
 	}
 }
 
-func untrustedDgramSource (ctx context.Context, address string) {
+func dgramSource (ctx context.Context, address string, trusted bool) {
 	pc, err  := net.ListenPacket ("udp", address)
 	if err != nil {
 		print ("failed to listen on port " + address)
@@ -65,7 +65,12 @@ func untrustedDgramSource (ctx context.Context, address string) {
 				doneChan <- err
 				return
 			}
-			fmt.Printf("Got %s from %s\n", buff, addr)
+			var prefix = ""
+			if trusted {
+				prefix = "not "
+			}
+
+			fmt.Printf("Got %s from %s %strusted\n", buff, addr, prefix)
 		}
 	} ()
 	select {
@@ -77,16 +82,12 @@ func untrustedDgramSource (ctx context.Context, address string) {
 }
 
 func main() {
-	// trustedDgram, err := net.Listen ("udp", "localhost:59023")
-	// if err != nil {
-	// 	print ("failed to listen on port 59023")
-	// 	return
-	// }
-	var ctx context.Context = context.Background()
+	var ctx, _ = context.WithCancel(context.Background())
 	go trustedStreamSource(ctx, "localhost:59024")
-	go untrustedDgramSource(ctx, ":59022")
+	go dgramSource(ctx, ":59022", false)
+	go dgramSource(ctx, ":59023", true)
 	for {
-		time.Sleep(10)
+		time.Sleep(10 * time.Second)
 	}
 }
 ```
