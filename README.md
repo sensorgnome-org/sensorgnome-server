@@ -4,10 +4,7 @@
 
 License: GPL2 or greater.
 
-A server for the [sensorgnome project](https://sensorgnome.org) in literate go.
-This file uses the [Literate Markdown Tangle](https://github.com/driusan/lmt) technique:
-code blocks marked with triple back-ticks are extracted into source files using `lmt`
-and these are compiled into an executable.
+A server for the [sensorgnome project](https://sensorgnome.org).
 
 ## Intro ##
 This server manages a growing set of networked sensorgnome receivers.
@@ -21,6 +18,8 @@ This server manages a growing set of networked sensorgnome receivers.
 - allow sensorgnomes from trusted IP addresses to self-register
 - allow sensorgnomes from untrusted IP addresses to self-register if they
   provide credentials; e.g. from motus.org and/or sensorgnome.org
+- allow remotely changing on-board tag database
+- allow remotely changing on-board deployment.txt configuration file
 
 ### Message Channels ###
 
