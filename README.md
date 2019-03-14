@@ -52,3 +52,27 @@ Messages arrive on these channels:
 
 Note that some BBKs are running a special release that allows them to send signed datagrams,
 but unfortunately we hardcoded the host address to 131.162.131.200 in uploader.js
+
+## Individual version changes ##
+
+### BBBK 2015-08-27 ###
+- e.g. SG-5113BBBK2853 (BSC HQ)
+- uploader.js:
+  - command is now `nc localhost 59024`
+  - `pushStartupInfo()` now sends serno as first line on stream
+- maintain_ssh_tunnel: map localhost:59024 to sensorgnome.org:59024
+- new file `/etc/network/if-up.d/init_ssh_tunnel` runs `maintain_ssh_tunnel` when
+  a non-local, non-usb interface comes up:
+```bash
+#!/bin/sh
+#
+# initiate an ssh tunnel without waiting for cron
+#
+if [ "$IFACE" != "usb0" && "$IFACE" != "lo" ]; then
+        /home/bone/proj/bonedongle/scripts/maintain_ssh_tunnel
+fi
+```
+
+### BBBK 2017-03-06 ###
+
+- same changes as above
