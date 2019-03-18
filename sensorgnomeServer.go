@@ -9,7 +9,10 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net"
+	"os"
+	"path"
 	"regexp"
 	"time"
 )
@@ -41,8 +44,8 @@ type ConnectedSG struct {
 	tunnelPort int       // ssh tunnel port, if applicable
 }
 
+// types of SG events
 type SGEventType int
-
 const (
 	SGConnect    SGEventType = iota // connected via ssh
 	SGDisconnect                    // disconnected from ssh
@@ -249,10 +252,21 @@ func NewSqliteSink(ctx context.Context, src <-chan Message, dbfile string, table
 	}
 }
 
-// map from serial number to connection info
-// for connected SGs
+const syncTimeDir="/home/sg_remote/last_sync"
+// get the last sync time for an SG; 0 if none
+func getLastSyncTime(serno Serno) time.Time {
+	var rv time.Time
+	info, err := os.Stat(path.Join(syncTimeDir, string(serno)))
+	if err != nil {
+		return rv
+	}
+	return info.ModTime()
+}
 
-var connectedSGs map[string]ConnectedSG
+// map from serial number to boolean indicating whether an
+// SG is connected
+
+var connectedSGs map[Serno]ConnectedSG
 
 // watch directory `dir` for creation / deletion of files
 // representing connected SGs, and pass appropriate events
@@ -264,6 +278,7 @@ var connectedSGs map[string]ConnectedSG
 // for the same SG.
 
 func ConnectionWatcher(ctx context.Context, dir string, sernoRE string, sink SGEventSink) {
+	connectedSGs = make(map[Serno]ConnectedSG)
 	re := regexp.MustCompile(sernoRE)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -285,10 +300,13 @@ func ConnectionWatcher(ctx context.Context, dir string, sernoRE string, sink SGE
 				parts := re.FindStringSubmatch(event.Name)
 				if parts != nil {
 					serno := Serno(parts[1])
+					now := time.Now()
 					if event.Op&fsnotify.Create == fsnotify.Create {
-						sink <- SGEvent{serno, time.Now(), SGConnect}
+						connectedSGs[serno] = ConnectedSG{serno: serno, tsConn: now, tsLastSync: getLastSyncTime(serno)}
+						sink <- SGEvent{serno, now, SGConnect}
 					} else if event.Op&fsnotify.Remove == fsnotify.Remove {
-						sink <- SGEvent{serno, time.Now(), SGDisconnect}
+						delete(connectedSGs, serno)
+						sink <- SGEvent{serno, now, SGDisconnect}
 					}
 				}
 			case err, ok := <-watcher.Errors:
@@ -306,6 +324,8 @@ func ConnectionWatcher(ctx context.Context, dir string, sernoRE string, sink SGE
 		for _, finfo := range files {
 			parts := re.FindStringSubmatch(finfo.Name())
 			if parts != nil {
+				serno := Serno(parts[1])
+				connectedSGs[serno] = ConnectedSG{serno: serno, tsConn: finfo.ModTime(), tsLastSync: getLastSyncTime(serno)}
 				sink <- SGEvent{Serno(parts[1]), finfo.ModTime(), SGConnect}
 			}
 		}
@@ -328,7 +348,73 @@ func ConnectionLogger(ctx context.Context, evt <-chan SGEvent) {
 	}
 }
 
+// range of (random) waits between receiver sync times, in minutes
+const (
+	syncWaitLo = 30
+	syncWaitHi = 90
+)
+
+
+// manage repeated sync jobs for a single SG
+func SyncWorker(ctx context.Context, serno Serno) {
+	for {
+		// set up a wait uniformly distributed between 30 and 90 minutes
+// real		wait := time.NewTimer(time.Duration(1E9 * (60 * (syncWaitLo + rand.Intn(syncWaitHi - syncWaitLo)))))
+		wait := time.NewTimer(time.Duration(1E8 * (1 * (syncWaitLo + rand.Intn(syncWaitHi - syncWaitLo)))))
+		select {
+		case <-wait.C:
+			// verify receiver is still connected
+			// launch the sync job at motus
+			sg, ok := connectedSGs[serno]
+			if !ok {
+				return
+			}
+			fmt.Printf("(fake)launching sync job for %s last was: %s\n", string(serno), sg.tsLastSync.Format(time.UnixDate))
+
+		case <-ctx.Done():
+			wait.Stop()
+			return
+		}
+	}
+}
+
+// manage sync jobs for SGs
+// When evt is `SGConnect`, start a goroutine that periodically
+// launches a motus sync job.  When evt is `SGDisconnect`, stop
+// the associated goroutine.  Multiple `SGConnect` events for
+// the same receiver are collapsed into the first one.
+func SyncManager(ctx context.Context, evt <-chan SGEvent) {
+	syncCancels := make(map[Serno]context.CancelFunc)
+	for {
+		select {
+		case event, ok := <- evt:
+			if ok {
+				serno := event.serno
+				_, have := syncCancels[serno]
+				switch event.kind {
+				case SGConnect:
+					if have {
+						break
+					}
+					newctx, cf := context.WithCancel(ctx)
+					syncCancels[serno] = cf
+					go SyncWorker(newctx, serno)
+				case SGDisconnect:
+					if ! have {
+						break
+					}
+					syncCancels[serno]()
+					delete(syncCancels, serno)
+				}
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 func main() {
+	rand.Seed(time.Now().UnixNano())
 	var ctx, _ = context.WithCancel(context.Background())
 	var msg = make(chan Message)
 	var sql = NewSqliteSink(ctx, msg, "/home/sg_remote/sg_remote.sqlite", "messages")
@@ -338,7 +424,7 @@ func main() {
 	go sql(msg)
 	//	go messageDump(msg)
 	evtChan := make(chan SGEvent)
-	go ConnectionLogger(ctx, evtChan)
+	go SyncManager(ctx, evtChan)
 	ConnectionWatcher(ctx, "/dev/shm", "sem.(SG-[0-9A-Z]{12})", evtChan)
 	<-ctx.Done()
 }
