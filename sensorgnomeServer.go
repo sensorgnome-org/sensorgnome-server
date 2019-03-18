@@ -1,16 +1,17 @@
 package main
 
 import (
-	"fmt"
-	"io"
-	"net"
-	"log"
-	"time"
 	"context"
 	"database/sql"
+	"fmt"
+	"github.com/fsnotify/fsnotify"
 	_ "github.com/mattn/go-sqlite3"
-//	"github.com/fsnotify/fsnotify"
-
+	"io"
+	"io/ioutil"
+	"log"
+	"net"
+	"regexp"
+	"time"
 )
 
 // The message type; `sender` is the authenticated origin of `text`
@@ -27,6 +28,35 @@ type LineReader struct {
 	buflen int       // number of characters left in buffer
 	rdr    io.Reader // connection being read from
 }
+
+// type representing an SG serial number
+type Serno string
+
+// a connected SG
+type ConnectedSG struct {
+	serno      Serno     // serial number; e.g. "SG-1234BBBK9812"
+	tsConn     time.Time // time at which connected
+	tsLastSync time.Time // time at which last synced with motus
+	tsNextSync time.Time // time at which next to be synced with motus
+	tunnelPort int       // ssh tunnel port, if applicable
+}
+
+type SGEventType int
+
+const (
+	SGConnect    SGEventType = iota // connected via ssh
+	SGDisconnect                    // disconnected from ssh
+)
+
+// event regarding an SG
+type SGEvent struct {
+	serno Serno       // serial number
+	ts    time.Time   // time of event
+	kind  SGEventType // what kind of event
+}
+
+// pipe for SG events
+type SGEventSink chan<- SGEvent
 
 // constructor
 func NewLineReader(rdr net.Conn, dest *[]byte) *LineReader {
@@ -160,11 +190,11 @@ func messageDump(src <-chan Message) {
 	}
 }
 
-type Sink func (<-chan Message)
+type Sink func(<-chan Message)
 
 // Create a sink for Messages which stores them in an sqlite table.
 // This table must have (at least) fields "sender", "ts" and "message"
-func NewSqliteSink(ctx context.Context, src<-chan Message, dbfile string, table string) Sink {
+func NewSqliteSink(ctx context.Context, src <-chan Message, dbfile string, table string) Sink {
 	db, err := sql.Open("sqlite3", dbfile)
 	if err != nil {
 		log.Fatal(err)
@@ -174,7 +204,7 @@ func NewSqliteSink(ctx context.Context, src<-chan Message, dbfile string, table 
                     ts DOUBLE PRIMARY KEY,
                     sender TEXT,
                     message TEXT
-                )` , table)
+                )`, table)
 	_, err = db.Exec(sqlStmt)
 	if err != nil {
 		log.Printf("%q: %s\n", err, sqlStmt)
@@ -201,12 +231,12 @@ func NewSqliteSink(ctx context.Context, src<-chan Message, dbfile string, table 
 		log.Fatal(err)
 	}
 	// create closure that uses stmt, db
-	return func (src <-chan Message) {
+	return func(src <-chan Message) {
 		for {
 			select {
-			case m:= <-src:
+			case m := <-src:
 				t := time.Now()
-				_, err := stmt.Exec(float64(t.UnixNano()) / 1.0E9, m.sender, m.text)
+				_, err := stmt.Exec(float64(t.UnixNano())/1.0E9, m.sender, m.text)
 				if err != nil {
 					log.Fatal(err)
 				}
@@ -219,6 +249,85 @@ func NewSqliteSink(ctx context.Context, src<-chan Message, dbfile string, table 
 	}
 }
 
+// map from serial number to connection info
+// for connected SGs
+
+var connectedSGs map[string]ConnectedSG
+
+// watch directory `dir` for creation / deletion of files
+// representing connected SGs, and pass appropriate events
+// to `sink`. Files representing SGs are those matching
+// the first capture group of `sernoRE`.
+// After establishing a watch goroutine, events are generated for
+// any files already in `dir`, using the file mtime.  This creates
+// a race condition under which `sink` might see two SGConnect events
+// for the same SG.
+
+func ConnectionWatcher(ctx context.Context, dir string, sernoRE string, sink SGEventSink) {
+	re := regexp.MustCompile(sernoRE)
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer watcher.Close()
+
+	err = watcher.Add(dir)
+	if err != nil {
+		log.Fatal(err)
+	}
+	go func() {
+		for {
+			select {
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+				parts := re.FindStringSubmatch(event.Name)
+				if parts != nil {
+					serno := Serno(parts[1])
+					if event.Op&fsnotify.Create == fsnotify.Create {
+						sink <- SGEvent{serno, time.Now(), SGConnect}
+					} else if event.Op&fsnotify.Remove == fsnotify.Remove {
+						sink <- SGEvent{serno, time.Now(), SGDisconnect}
+					}
+				}
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
+				log.Println("error:", err)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	files, err := ioutil.ReadDir(dir)
+	if err == nil {
+		for _, finfo := range files {
+			parts := re.FindStringSubmatch(finfo.Name())
+			if parts != nil {
+				sink <- SGEvent{Serno(parts[1]), finfo.ModTime(), SGConnect}
+			}
+		}
+	}
+}
+
+func ConnectionLogger(ctx context.Context, evt <-chan SGEvent) {
+	for {
+		select {
+		case e := <-evt:
+			switch e.kind {
+			case SGConnect:
+				fmt.Printf("Connect: %s\n", e.serno)
+			case SGDisconnect:
+				fmt.Printf("Disconnect: %s\n", e.serno)
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 func main() {
 	var ctx, _ = context.WithCancel(context.Background())
 	var msg = make(chan Message)
@@ -227,6 +336,9 @@ func main() {
 	go dgramSource(ctx, ":59022", false, msg)
 	go dgramSource(ctx, ":59023", true, msg)
 	go sql(msg)
-//	go messageDump(msg)
+	//	go messageDump(msg)
+	evtChan := make(chan SGEvent)
+	go ConnectionLogger(ctx, evtChan)
+	ConnectionWatcher(ctx, "/dev/shm", "sem.(SG-[0-9A-Z]{12})", evtChan)
 	<-ctx.Done()
 }
