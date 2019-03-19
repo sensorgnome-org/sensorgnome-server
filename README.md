@@ -64,13 +64,14 @@ but unfortunately we hardcoded the host address to 131.162.131.200 in uploader.j
 - new file `/etc/network/if-up.d/init_ssh_tunnel` runs `maintain_ssh_tunnel` when
   a non-local, non-usb interface comes up:
 ```bash
-#!/bin/sh
+#!/bin/bash
 #
 # initiate an ssh tunnel without waiting for cron
 #
-if [ "$IFACE" != "usb0" && "$IFACE" != "lo" ]; then
+if [[ "$IFACE" != "usb0" && "$IFACE" != "lo" ]]; then
         /home/bone/proj/bonedongle/scripts/maintain_ssh_tunnel
 fi
+exit 0
 ```
 
 ### BBBK 2017-03-06 ###
