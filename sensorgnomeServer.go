@@ -42,13 +42,14 @@ type Message struct {
 // type representing an SG serial number
 type Serno string
 
-// a connected SG
-type ConnectedSG struct {
+// an SG we have seen recently
+type ActiveSG struct {
 	serno      Serno     // serial number; e.g. "SG-1234BBBK9812"
 	tsConn     time.Time // time at which connected
 	tsLastSync time.Time // time at which last synced with motus
 	tsNextSync time.Time // time at which next to be synced with motus
 	tunnelPort int       // ssh tunnel port, if applicable
+	connected  bool      // actually connected?  once we've seen a receiver, we keep this struct in memory, but set this field to false when it disconnects
 }
 
 // types of SG events
@@ -273,7 +274,7 @@ func TunnelPort(serno Serno) (t int) {
 // map from serial number to boolean indicating whether an
 // SG is connected
 
-var connectedSGs map[Serno]*ConnectedSG
+var activeSGs map[Serno]*ActiveSG
 
 // watch directory `dir` for creation / deletion of files
 // representing connected SGs, and pass appropriate events
@@ -285,7 +286,7 @@ var connectedSGs map[Serno]*ConnectedSG
 // for the same SG.
 
 func ConnectionWatcher(ctx context.Context, dir string, sernoRE string, sink SGEventSink) {
-	connectedSGs = make(map[Serno]*ConnectedSG)
+	activeSGs = make(map[Serno]*ActiveSG)
 	re := regexp.MustCompile(sernoRE)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -309,12 +310,17 @@ func ConnectionWatcher(ctx context.Context, dir string, sernoRE string, sink SGE
 					serno := Serno(parts[1])
 					now := time.Now()
 					if event.Op&fsnotify.Create == fsnotify.Create {
-						connectedSGs[serno] = &ConnectedSG{serno: serno, tsConn: now, tsLastSync: SGSyncTime(serno), tunnelPort: TunnelPort(serno)}
+						if _, ok = activeSGs[serno]; !ok {
+							// an SG we haven't seen before during this server session
+							activeSGs[serno] = &ActiveSG{serno: serno, tsConn: now, tsLastSync: SGSyncTime(serno), tunnelPort: TunnelPort(serno), connected: true}
+						} else {
+							// SG already on active list, so just update connection time and status
+							activeSGs[serno].tsConn = now
+							activeSGs[serno].connected = true
+						}
 						sink <- SGEvent{serno, now, SGConnect}
 					} else if event.Op&fsnotify.Remove == fsnotify.Remove {
-						// note: GC takes care of deleting the connectedSG object once we
-						// remove its pointer from the only place it is stored, namely the connectedSGs map
-						delete(connectedSGs, serno)
+						activeSGs[serno].connected = false
 						sink <- SGEvent{serno, now, SGDisconnect}
 					}
 				}
@@ -334,7 +340,7 @@ func ConnectionWatcher(ctx context.Context, dir string, sernoRE string, sink SGE
 			parts := re.FindStringSubmatch(finfo.Name())
 			if parts != nil {
 				serno := Serno(parts[1])
-				connectedSGs[serno] = &ConnectedSG{serno: serno, tsConn: finfo.ModTime(), tsLastSync: SGSyncTime(serno), tunnelPort: TunnelPort(serno)}
+				activeSGs[serno] = &ActiveSG{serno: serno, tsConn: finfo.ModTime(), tsLastSync: SGSyncTime(serno), tunnelPort: TunnelPort(serno), connected: true}
 				sink <- SGEvent{Serno(parts[1]), finfo.ModTime(), SGConnect}
 			}
 		}
@@ -361,8 +367,8 @@ func ConnectionLogger(ctx context.Context, evt <-chan SGEvent) {
 // manage repeated sync jobs for a single SG
 // emit a message each time a receiver sync is launched
 func SyncWorker(ctx context.Context, serno Serno, msg chan<- Message) {
-	// grab receiver info (for tunnelPort)
-	sg, ok := connectedSGs[serno]
+	// grab receiver info pointer
+	sg, ok := activeSGs[serno]
 	if !ok {
 		return
 	}
@@ -374,13 +380,11 @@ func SyncWorker(ctx context.Context, serno Serno, msg chan<- Message) {
 		// set up a wait uniformly distributed between 30 and 90 minutes
 		delay := time.Duration(1E9 * (60 * (SyncWaitLo + rand.Intn(SyncWaitHi-SyncWaitLo))))
 		wait := time.NewTimer(delay)
-		connectedSGs[serno].tsNextSync = time.Now().Add(delay)
+		sg.tsNextSync = time.Now().Add(delay)
 		select {
 		case synctime := <-wait.C:
-			// verify receiver is still connected
-			// launch the sync job at motus
-			_, ok := connectedSGs[serno]
-			if !ok {
+			// if receiver is not still connected, end this goroutine
+			if !activeSGs[serno].connected {
 				return
 			}
 			cmd := exec.Command("ssh", "-i", MotusUserKey, "-f", "-N", "-T",
@@ -396,7 +400,7 @@ func SyncWorker(ctx context.Context, serno Serno, msg chan<- Message) {
 				cp, MotusUser, "touch", tf)
 			err = cmd.Run()
 			if err == nil {
-				connectedSGs[serno].tsLastSync = synctime
+				activeSGs[serno].tsLastSync = synctime
 				msg <- Message{sender: string(serno), text: strconv.Itoa(int(SGSync))}
 			} else {
 				fmt.Println(err.Error())
