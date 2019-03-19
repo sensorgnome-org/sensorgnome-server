@@ -11,25 +11,32 @@ import (
 	"log"
 	"math/rand"
 	"net"
-	"os"
-	"path"
+	//	"os"
+	"os/exec"
+	//	"path"
 	"regexp"
+	"strconv"
 	"time"
+)
+
+// customization constants
+const (
+	MotusUser         = "sg@sgdata.motus.org"                          // user on sgdata.motus.org; this is who ssh makes us be
+	MotusUserKey      = "/home/sg_remote/.ssh/id_ed25519_sgorg_sgdata" // ssh key to use for sync on sgdata.motus.org
+	MotusControlPath  = "/home/sg_remote/sgdata.ssh"                   // control path for multiplexing port mappings to sgdata.motus.org
+	SyncWaitLo        = 30                                             // minimum time between syncs of a receiver (minutes)
+	SyncWaitHi        = 90                                             // maximum time between syncs of a receiver (minutes)
+	SyncTimeDir       = "/home/sg_remote/last_sync"                    // directory with one file per SG; mtime is last sync time
+	SGDBFile          = "/home/sg_remote/sg_remote.sqlite"             // sqlite database with receiver info
+	ConnectionSemPath = "/dev/shm"                                     // directory where sshd maintains semaphores indicating connected SGs
+	ConnectionSemRE   = "sem.(SG-[0-9A-Z]{12})"                        // regular expression for matching SG semaphores (capture group is serno)
 )
 
 // The message type; `sender` is the authenticated origin of `text`
 type Message struct {
-	sender string // typically the SG serial number
-	text   string // typically a JSON-formatted message
-}
-
-// read one line at a time from an io.Reader
-type LineReader struct {
-	dest   *[]byte   // where a single line is written
-	buf    []byte    // buffer for reading
-	bufp   int       // position of next character in buf to use
-	buflen int       // number of characters left in buffer
-	rdr    io.Reader // connection being read from
+	ts     float64 // timestamp; if 0, means not set
+	sender string  // typically the SG serial number
+	text   string  // typically a JSON- or CSV- formatted message
 }
 
 // type representing an SG serial number
@@ -46,9 +53,11 @@ type ConnectedSG struct {
 
 // types of SG events
 type SGEventType int
+
 const (
-	SGConnect    SGEventType = iota // connected via ssh
-	SGDisconnect                    // disconnected from ssh
+	SGDisconnect SGEventType = iota // connected via ssh
+	SGConnect                       // disconnected from ssh
+	SGSync                          // data sync with motus.org
 )
 
 // event regarding an SG
@@ -60,6 +69,15 @@ type SGEvent struct {
 
 // pipe for SG events
 type SGEventSink chan<- SGEvent
+
+// read one line at a time from an io.Reader
+type LineReader struct {
+	dest   *[]byte   // where a single line is written
+	buf    []byte    // buffer for reading
+	bufp   int       // position of next character in buf to use
+	buflen int       // number of characters left in buffer
+	rdr    io.Reader // connection being read from
+}
 
 // constructor
 func NewLineReader(rdr net.Conn, dest *[]byte) *LineReader {
@@ -186,87 +204,76 @@ func dgramSource(ctx context.Context, address string, trusted bool, dst chan<- M
 	}
 }
 
-// A sink for Messages which dumps them to stdout.
+// Debug: A sink for Messages which dumps them to stdout.
 func messageDump(src <-chan Message) {
 	for m := range src {
 		fmt.Printf("%s: %s\n", m.sender, m.text)
 	}
 }
 
-type Sink func(<-chan Message)
-
-// Create a sink for Messages which stores them in an sqlite table.
-// This table must have (at least) fields "sender", "ts" and "message"
-func NewSqliteSink(ctx context.Context, src <-chan Message, dbfile string, table string) Sink {
-	db, err := sql.Open("sqlite3", dbfile)
-	if err != nil {
-		log.Fatal(err)
-	}
-	sqlStmt := fmt.Sprintf(`
-                CREATE TABLE IF NOT EXISTS %s (
-                    ts DOUBLE PRIMARY KEY,
-                    sender TEXT,
-                    message TEXT
-                )`, table)
-	_, err = db.Exec(sqlStmt)
-	if err != nil {
-		log.Printf("%q: %s\n", err, sqlStmt)
-		return nil
-	}
-
-	sqlStmt = fmt.Sprintf(`
-                CREATE INDEX IF NOT EXISTS %s_sender ON %s(sender)`,
-		table, table)
-	_, err = db.Exec(sqlStmt)
-	if err != nil {
-		log.Printf("%q: %s\n", err, sqlStmt)
-		return nil
-	}
-	sqlStmt = fmt.Sprintf("SELECT ts, sender, message FROM %s LIMIT 0", table)
-	_, err = db.Exec(sqlStmt)
-	if err != nil {
-		log.Printf("%q: %s\n", err, sqlStmt)
-		return nil
-	}
-
-	stmt, err := db.Prepare(fmt.Sprintf("INSERT INTO %s(ts, sender, message) values (?, ?, ?)", table))
+// Goroutine that accepts Messages and stores them in an sqlite
+// table called "messages" in the global DB.
+func sqliteSink(ctx context.Context, src <-chan Message) {
+	stmt, err := DB.Prepare("INSERT INTO messages (ts, sender, message) VALUES (?, ?, ?)")
 	if err != nil {
 		log.Fatal(err)
 	}
 	// create closure that uses stmt, db
-	return func(src <-chan Message) {
-		for {
-			select {
-			case m := <-src:
-				t := time.Now()
-				_, err := stmt.Exec(float64(t.UnixNano())/1.0E9, m.sender, m.text)
-				if err != nil {
-					log.Fatal(err)
-				}
-			case <-ctx.Done():
-				stmt.Close()
-				db.Close()
-				return
+	defer stmt.Close()
+	for {
+		select {
+		case m := <-src:
+			if m.ts == 0 {
+				m.ts = float64(time.Now().UnixNano()) / 1.0E9
 			}
+			_, err := stmt.Exec(m.ts, m.sender, m.text)
+			if err != nil {
+				log.Fatal(err)
+			}
+		case <-ctx.Done():
+			return
 		}
 	}
 }
 
-const syncTimeDir="/home/sg_remote/last_sync"
-// get the last sync time for an SG; 0 if none
-func getLastSyncTime(serno Serno) time.Time {
-	var rv time.Time
-	info, err := os.Stat(path.Join(syncTimeDir, string(serno)))
-	if err != nil {
-		return rv
+// get the latest sync time for a serial number
+// uses global `DB`; returns 0 if no sync has occurred
+func SGSyncTime(serno Serno) (lts time.Time) {
+	sqlStmt := fmt.Sprintf(`
+                   SELECT max(ts) FROM messages WHERE sender = '%s' and substr(message, 1, 1) == '2'`,
+		string(serno))
+	rows, err := DB.Query(sqlStmt)
+	defer rows.Close()
+	if err == nil {
+		if rows.Next() {
+			var ts float64
+			rows.Scan(&ts)
+			lts = time.Unix(0, int64(ts*1E9))
+		}
 	}
-	return info.ModTime()
+	return
+}
+
+// get the tunnel port for a serial number
+// uses global `DB`; returns 0 on error
+func TunnelPort(serno Serno) (t int) {
+	sqlStmt := fmt.Sprintf(`
+                   SELECT tunnelPort FROM receivers WHERE serno='%s'`,
+		string(serno))
+	rows, err := DB.Query(sqlStmt)
+	defer rows.Close()
+	if err == nil {
+		if rows.Next() {
+			rows.Scan(&t)
+		}
+	}
+	return
 }
 
 // map from serial number to boolean indicating whether an
 // SG is connected
 
-var connectedSGs map[Serno]ConnectedSG
+var connectedSGs map[Serno]*ConnectedSG
 
 // watch directory `dir` for creation / deletion of files
 // representing connected SGs, and pass appropriate events
@@ -278,7 +285,7 @@ var connectedSGs map[Serno]ConnectedSG
 // for the same SG.
 
 func ConnectionWatcher(ctx context.Context, dir string, sernoRE string, sink SGEventSink) {
-	connectedSGs = make(map[Serno]ConnectedSG)
+	connectedSGs = make(map[Serno]*ConnectedSG)
 	re := regexp.MustCompile(sernoRE)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -302,9 +309,11 @@ func ConnectionWatcher(ctx context.Context, dir string, sernoRE string, sink SGE
 					serno := Serno(parts[1])
 					now := time.Now()
 					if event.Op&fsnotify.Create == fsnotify.Create {
-						connectedSGs[serno] = ConnectedSG{serno: serno, tsConn: now, tsLastSync: getLastSyncTime(serno)}
+						connectedSGs[serno] = &ConnectedSG{serno: serno, tsConn: now, tsLastSync: SGSyncTime(serno), tunnelPort: TunnelPort(serno)}
 						sink <- SGEvent{serno, now, SGConnect}
 					} else if event.Op&fsnotify.Remove == fsnotify.Remove {
+						// note: GC takes care of deleting the connectedSG object once we
+						// remove its pointer from the only place it is stored, namely the connectedSGs map
 						delete(connectedSGs, serno)
 						sink <- SGEvent{serno, now, SGDisconnect}
 					}
@@ -325,13 +334,14 @@ func ConnectionWatcher(ctx context.Context, dir string, sernoRE string, sink SGE
 			parts := re.FindStringSubmatch(finfo.Name())
 			if parts != nil {
 				serno := Serno(parts[1])
-				connectedSGs[serno] = ConnectedSG{serno: serno, tsConn: finfo.ModTime(), tsLastSync: getLastSyncTime(serno)}
+				connectedSGs[serno] = &ConnectedSG{serno: serno, tsConn: finfo.ModTime(), tsLastSync: SGSyncTime(serno), tunnelPort: TunnelPort(serno)}
 				sink <- SGEvent{Serno(parts[1]), finfo.ModTime(), SGConnect}
 			}
 		}
 	}
 }
 
+// used only for debugging
 func ConnectionLogger(ctx context.Context, evt <-chan SGEvent) {
 	for {
 		select {
@@ -348,28 +358,49 @@ func ConnectionLogger(ctx context.Context, evt <-chan SGEvent) {
 	}
 }
 
-// range of (random) waits between receiver sync times, in minutes
-const (
-	syncWaitLo = 30
-	syncWaitHi = 90
-)
-
-
 // manage repeated sync jobs for a single SG
-func SyncWorker(ctx context.Context, serno Serno) {
+// emit a message each time a receiver sync is launched
+func SyncWorker(ctx context.Context, serno Serno, msg chan<- Message) {
+	// grab receiver info (for tunnelPort)
+	sg, ok := connectedSGs[serno]
+	if !ok {
+		return
+	}
+	cp := fmt.Sprintf("-oControlPath=%s", MotusControlPath)
+	pf := fmt.Sprintf("-R%d:localhost:%d", sg.tunnelPort, sg.tunnelPort)
+	tf := fmt.Sprintf("/sgm_local/sync/method=%d,serno=%s", sg.tunnelPort, string(serno))
+
 	for {
 		// set up a wait uniformly distributed between 30 and 90 minutes
-// real		wait := time.NewTimer(time.Duration(1E9 * (60 * (syncWaitLo + rand.Intn(syncWaitHi - syncWaitLo)))))
-		wait := time.NewTimer(time.Duration(1E8 * (1 * (syncWaitLo + rand.Intn(syncWaitHi - syncWaitLo)))))
+		delay := time.Duration(1E9 * (60 * (SyncWaitLo + rand.Intn(SyncWaitHi-SyncWaitLo))))
+		wait := time.NewTimer(delay)
+		connectedSGs[serno].tsNextSync = time.Now().Add(delay)
 		select {
-		case <-wait.C:
+		case synctime := <-wait.C:
 			// verify receiver is still connected
 			// launch the sync job at motus
-			sg, ok := connectedSGs[serno]
+			_, ok := connectedSGs[serno]
 			if !ok {
 				return
 			}
-			fmt.Printf("(fake)launching sync job for %s last was: %s\n", string(serno), sg.tsLastSync.Format(time.UnixDate))
+			cmd := exec.Command("ssh", "-i", MotusUserKey, "-f", "-N", "-T",
+				"-oStrictHostKeyChecking=no", "-oExitOnForwardFailure=yes", "-oControlMaster=auto",
+				"-oServerAliveInterval=5", "-oServerAliveCountMax=3",
+				cp, pf, MotusUser)
+			err := cmd.Run()
+			if err != nil {
+				fmt.Println(err.Error())
+			}
+			// ignoring error; it is likely just the failure to map an already mapped port
+			cmd = exec.Command("ssh", "-i", MotusUserKey, "-oControlMaster=auto",
+				cp, MotusUser, "touch", tf)
+			err = cmd.Run()
+			if err == nil {
+				connectedSGs[serno].tsLastSync = synctime
+				msg <- Message{sender: string(serno), text: strconv.Itoa(int(SGSync))}
+			} else {
+				fmt.Println(err.Error())
+			}
 
 		case <-ctx.Done():
 			wait.Stop()
@@ -378,18 +409,20 @@ func SyncWorker(ctx context.Context, serno Serno) {
 	}
 }
 
-// manage sync jobs for SGs
+// manage events for SGs
 // When evt is `SGConnect`, start a goroutine that periodically
 // launches a motus sync job.  When evt is `SGDisconnect`, stop
 // the associated goroutine.  Multiple `SGConnect` events for
-// the same receiver are collapsed into the first one.
-func SyncManager(ctx context.Context, evt <-chan SGEvent) {
+// the same receiver are collapsed into the first one.  Events
+// are recorded as messages.
+func EventManager(ctx context.Context, evt <-chan SGEvent, msg chan<- Message) {
 	syncCancels := make(map[Serno]context.CancelFunc)
 	for {
 		select {
-		case event, ok := <- evt:
+		case event, ok := <-evt:
 			if ok {
 				serno := event.serno
+				msg <- Message{sender: string(serno), ts: float64(event.ts.UnixNano()) / 1.0E9, text: strconv.Itoa(int(event.kind))}
 				_, have := syncCancels[serno]
 				switch event.kind {
 				case SGConnect:
@@ -398,9 +431,9 @@ func SyncManager(ctx context.Context, evt <-chan SGEvent) {
 					}
 					newctx, cf := context.WithCancel(ctx)
 					syncCancels[serno] = cf
-					go SyncWorker(newctx, serno)
+					go SyncWorker(newctx, serno, msg)
 				case SGDisconnect:
-					if ! have {
+					if !have {
 						break
 					}
 					syncCancels[serno]()
@@ -413,18 +446,71 @@ func SyncManager(ctx context.Context, evt <-chan SGEvent) {
 	}
 }
 
+// global database pointer
+var DB *sql.DB
+
+// open/create the main database
+func OpenDB(path string) (db *sql.DB) {
+	var err error
+	db, err = sql.Open("sqlite3", SGDBFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	stmts := [...]string{
+		`CREATE TABLE IF NOT EXISTS messages (
+                    ts DOUBLE,
+                    sender TEXT,
+                    message TEXT
+                )`,
+		`CREATE INDEX IF NOT EXISTS messages_ts ON messages(ts)`,
+		`CREATE INDEX IF NOT EXISTS messages_sender ON messages(sender)`,
+		`CREATE INDEX IF NOT EXISTS messages_sender_ts ON messages(sender, ts)`,
+		`CREATE INDEX IF NOT EXISTS messages_sender_type_ts ON messages(sender, substr(message, 1, 1), ts)`,
+		`CREATE TABLE IF NOT EXISTS receivers (
+                 serno        TEXT UNIQUE PRIMARY KEY, -- only one entry per receiver
+                 creationdate REAL,                    -- timestamp when this entry was created
+                 tunnelport   INTEGER UNIQUE,          -- port used on server for reverse tunnel back to sensorgnome
+                 pubkey       TEXT,                    -- unique public/private key pair used by sensorgnome to login to server
+                 privkey      TEXT,
+                 verified     INTEGER DEFAULT 0        -- has this SG been verified to belong to a real user?
+                 )`,
+		`CREATE INDEX IF NOT EXISTS receivers_tunnelport ON receivers(tunnelport)`,
+		`CREATE TABLE IF NOT EXISTS deleted_receivers (
+                 ts           REAL,                    -- deletion timestamp
+                 serno        TEXT,                    -- possibly multiple entries per receiver
+                 creationdate REAL,                    -- timestamp when this entry was created
+                 tunnelport   INTEGER,                 -- port used on server for reverse tunnel back to sensorgnome
+                 pubkey       TEXT,                    -- unique public/private key pair used by sensorgnome to login to server
+                 privkey      TEXT,
+                 verified     INTEGER DEFAULT 0        -- non-zero when verified
+                 )`,
+		`CREATE INDEX IF NOT EXISTS deleted_receivers_tunnelport ON deleted_receivers(tunnelport)`,
+		`PRAGMA busy_timeout = 60000`} // set a very generous 1-minute timeout for busy wait
+
+	for _, s := range stmts {
+		_, err = db.Exec(s)
+		if err != nil {
+			log.Printf("error: %s\n", s)
+			log.Fatal(err)
+		}
+	}
+	return
+}
+
 func main() {
 	rand.Seed(time.Now().UnixNano())
 	var ctx, _ = context.WithCancel(context.Background())
+	DB = OpenDB(SGDBFile)
 	var msg = make(chan Message)
-	var sql = NewSqliteSink(ctx, msg, "/home/sg_remote/sg_remote.sqlite", "messages")
+	evtChan := make(chan SGEvent)
+	go sqliteSink(ctx, msg)
 	go trustedStreamSource(ctx, "localhost:59024", msg)
 	go dgramSource(ctx, ":59022", false, msg)
 	go dgramSource(ctx, ":59023", true, msg)
-	go sql(msg)
 	//	go messageDump(msg)
-	evtChan := make(chan SGEvent)
-	go SyncManager(ctx, evtChan)
-	ConnectionWatcher(ctx, "/dev/shm", "sem.(SG-[0-9A-Z]{12})", evtChan)
+	go EventManager(ctx, evtChan, msg)
+	ConnectionWatcher(ctx, ConnectionSemPath, ConnectionSemRE, evtChan)
+
+	// wait until cancelled (nothing does this, though)
 	<-ctx.Done()
 }
