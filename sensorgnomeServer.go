@@ -17,6 +17,7 @@ import (
 	//	"path"
 	"regexp"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -274,10 +275,10 @@ func TunnelPort(serno Serno) (t int) {
 	return
 }
 
-// map from serial number to boolean indicating whether an
-// SG is connected
+// map from serial number to active SG structure
+// we use a sync.Map to allow safe multi-threaded access
 
-var activeSGs map[Serno]*ActiveSG
+var activeSGs sync.Map
 
 // watch directory `dir` for creation / deletion of files
 // representing connected SGs, and pass appropriate events
@@ -289,7 +290,6 @@ var activeSGs map[Serno]*ActiveSG
 // for the same SG.
 
 func ConnectionWatcher(ctx context.Context, dir string, sernoRE string, sink SGEventSink) {
-	activeSGs = make(map[Serno]*ActiveSG)
 	re := regexp.MustCompile(sernoRE)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -313,18 +313,22 @@ func ConnectionWatcher(ctx context.Context, dir string, sernoRE string, sink SGE
 					serno := Serno(parts[1])
 					now := time.Now()
 					if event.Op&fsnotify.Create == fsnotify.Create {
-						if _, ok = activeSGs[serno]; !ok {
+						if sg_, ok := activeSGs.Load(serno); !ok {
 							// an SG we haven't seen before during this server session
-							activeSGs[serno] = &ActiveSG{Serno: serno, TsConn: now, TsLastSync: SGSyncTime(serno), TunnelPort: TunnelPort(serno), Connected: true}
+							activeSGs.Store(serno, &ActiveSG{Serno: serno, TsConn: now, TsLastSync: SGSyncTime(serno), TunnelPort: TunnelPort(serno), Connected: true})
 						} else {
 							// SG already on active list, so just update connection time and status
-							activeSGs[serno].TsConn = now
-							activeSGs[serno].Connected = true
+							sg := sg_.(*ActiveSG)
+							sg.TsConn = now
+							sg.Connected = true
 						}
 						sink <- SGEvent{serno, now, SGConnect}
 					} else if event.Op&fsnotify.Remove == fsnotify.Remove {
-						activeSGs[serno].Connected = false
-						sink <- SGEvent{serno, now, SGDisconnect}
+						if sg_, ok := activeSGs.Load(serno); ok {
+							sg := sg_.(*ActiveSG)
+							sg.Connected = false
+							sink <- SGEvent{serno, now, SGDisconnect}
+						}
 					}
 				}
 			case err, ok := <-watcher.Errors:
@@ -343,7 +347,7 @@ func ConnectionWatcher(ctx context.Context, dir string, sernoRE string, sink SGE
 			parts := re.FindStringSubmatch(finfo.Name())
 			if parts != nil {
 				serno := Serno(parts[1])
-				activeSGs[serno] = &ActiveSG{Serno: serno, TsConn: finfo.ModTime(), TsLastSync: SGSyncTime(serno), TunnelPort: TunnelPort(serno), Connected: true}
+				activeSGs.Store(serno, &ActiveSG{Serno: serno, TsConn: finfo.ModTime(), TsLastSync: SGSyncTime(serno), TunnelPort: TunnelPort(serno), Connected: true})
 				sink <- SGEvent{Serno(parts[1]), finfo.ModTime(), SGConnect}
 			}
 		}
@@ -371,10 +375,11 @@ func ConnectionLogger(ctx context.Context, evt <-chan SGEvent) {
 // emit a message each time a receiver sync is launched
 func SyncWorker(ctx context.Context, serno Serno, msg chan<- Message) {
 	// grab receiver info pointer
-	sg, ok := activeSGs[serno]
+	sg_, ok := activeSGs.Load(serno)
 	if !ok {
 		return
 	}
+	sg := sg_.(*ActiveSG)
 	cp := fmt.Sprintf("-oControlPath=%s", MotusControlPath)
 	pf := fmt.Sprintf("-R%d:localhost:%d", sg.TunnelPort, sg.TunnelPort)
 	tf := fmt.Sprintf(MotusSyncTemplate, sg.TunnelPort, string(serno))
@@ -387,7 +392,7 @@ func SyncWorker(ctx context.Context, serno Serno, msg chan<- Message) {
 		select {
 		case synctime := <-wait.C:
 			// if receiver is not still connected, end this goroutine
-			if !activeSGs[serno].Connected {
+			if sg, ok := activeSGs.Load(serno); ! ok || ! sg.(*ActiveSG).Connected {
 				return
 			}
 			cmd := exec.Command("ssh", "-i", MotusUserKey, "-f", "-N", "-T",
@@ -403,8 +408,10 @@ func SyncWorker(ctx context.Context, serno Serno, msg chan<- Message) {
 				cp, MotusUser, "touch", tf)
 			err = cmd.Run()
 			if err == nil {
-				activeSGs[serno].TsLastSync = synctime
-				msg <- Message{sender: string(serno), text: strconv.Itoa(int(SGSync))}
+				if sg, ok := activeSGs.Load(serno); ok {
+					sg.(*ActiveSG).TsLastSync = synctime
+					msg <- Message{sender: string(serno), text: strconv.Itoa(int(SGSync))}
+				}
 			} else {
 				fmt.Println(err.Error())
 			}
@@ -552,27 +559,38 @@ ConnLoop:
 			case CMD_QUIT:
 				break ConnLoop
 			case CMD_JSON:
-				js, err := json.Marshal(activeSGs)
-				if err != nil {
-					fmt.Printf("Got err=%s when marshalling activeSGs\n", err.Error())
-					continue
-				}
-				b = string(js)
+				bb := make([]byte, 0, 1000)
+				bb = append(bb, '{')
+				activeSGs.Range(func(serno interface{}, sgp interface{}) bool {
+					js, err := json.Marshal(sgp.(*ActiveSG))
+					if err == nil {
+						if len(bb) > 1 {
+							bb = append(bb, ',')
+						}
+						bb = append(bb, "\"" + string(serno.(Serno)) + "\":"...)
+						bb = append(bb, js...)
+					}
+					return true
+				})
+				bb = append(bb, '}')
+				b = string(bb)
 			case CMD_WHO, CMD_PORT, CMD_SERNO:
-				for _, sgp := range activeSGs {
-					if sgp.Connected {
+				activeSGs.Range(func(serno interface{}, sgp interface{}) bool {
+					sg := sgp.(*ActiveSG)
+					if sg.Connected {
 						if cmd == CMD_SERNO || cmd == CMD_WHO {
-							b += string(sgp.Serno)
+							b += string(sg.Serno)
 						}
 						if cmd == CMD_WHO {
 							b += ","
 						}
 						if cmd == CMD_PORT || cmd == CMD_WHO {
-							b += strconv.Itoa(sgp.TunnelPort)
+							b += strconv.Itoa(sg.TunnelPort)
 						}
 						b += "\n"
 					}
-				}
+					return true
+				})
 			}
 		}
 		_, err = io.WriteString(conn, b)
