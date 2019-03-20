@@ -50,7 +50,8 @@ type ActiveSG struct {
 	tsLastSync time.Time // time at which last synced with motus
 	tsNextSync time.Time // time at which next to be synced with motus
 	tunnelPort int       // ssh tunnel port, if applicable
-	connected  bool      // actually connected?  once we've seen a receiver, we keep this struct in memory, but set this field to false when it disconnects
+	connected  bool      // actually connected?  once we've seen a receiver, we keep this struct in memory,
+	                     // but set this field to false when it disconnects
 }
 
 // types of SG events
@@ -378,7 +379,7 @@ func SyncWorker(ctx context.Context, serno Serno, msg chan<- Message) {
 	tf := fmt.Sprintf(MotusSyncTemplate, sg.tunnelPort, string(serno))
 
 	for {
-		// set up a wait uniformly distributed between 30 and 90 minutes
+		// set up a wait uniformly distributed between lo and hi times
 		delay := time.Duration(SyncWaitLo + rand.Int31n(SyncWaitHi-SyncWaitLo)) * time.Minute
 		wait := time.NewTimer(delay)
 		sg.tsNextSync = time.Now().Add(delay)
