@@ -378,7 +378,7 @@ func SyncWorker(ctx context.Context, serno Serno, msg chan<- Message) {
 
 	for {
 		// set up a wait uniformly distributed between 30 and 90 minutes
-		delay := time.Duration(1E9 * (60 * (SyncWaitLo + rand.Intn(SyncWaitHi-SyncWaitLo))))
+		delay := time.Duration(1E9 * (60 * (SyncWaitLo + rand.Int63n(SyncWaitHi-SyncWaitLo))))
 		wait := time.NewTimer(delay)
 		sg.tsNextSync = time.Now().Add(delay)
 		select {
