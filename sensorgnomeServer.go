@@ -24,6 +24,7 @@ const (
 	MotusUser         = "sg@sgdata.motus.org"                          // user on sgdata.motus.org; this is who ssh makes us be
 	MotusUserKey      = "/home/sg_remote/.ssh/id_ed25519_sgorg_sgdata" // ssh key to use for sync on sgdata.motus.org
 	MotusControlPath  = "/home/sg_remote/sgdata.ssh"                   // control path for multiplexing port mappings to sgdata.motus.org
+	MotusSyncTemplate = "/sgm_local/sync/method=%d,serno=%s"           // template for file touched on sgdata.motus.org to cause sync; %d=port, %s=serno
 	SyncWaitLo        = 30                                             // minimum time between syncs of a receiver (minutes)
 	SyncWaitHi        = 90                                             // maximum time between syncs of a receiver (minutes)
 	SyncTimeDir       = "/home/sg_remote/last_sync"                    // directory with one file per SG; mtime is last sync time
@@ -374,7 +375,7 @@ func SyncWorker(ctx context.Context, serno Serno, msg chan<- Message) {
 	}
 	cp := fmt.Sprintf("-oControlPath=%s", MotusControlPath)
 	pf := fmt.Sprintf("-R%d:localhost:%d", sg.tunnelPort, sg.tunnelPort)
-	tf := fmt.Sprintf("/sgm_local/sync/method=%d,serno=%s", sg.tunnelPort, string(serno))
+	tf := fmt.Sprintf(MotusSyncTemplate, sg.tunnelPort, string(serno))
 
 	for {
 		// set up a wait uniformly distributed between 30 and 90 minutes
