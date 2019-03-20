@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"github.com/fsnotify/fsnotify"
 	_ "github.com/mattn/go-sqlite3"
@@ -503,6 +504,92 @@ func OpenDB(path string) (db *sql.DB) {
 	return
 }
 
+// Handle status requests.
+// The request is a one line format, such as "json\n".
+// The reply is a summary of active receiver status in that format.
+// Posssible formats:
+// - `json`: full summary of active receiver status; an object indexed
+//   by serial numbers
+// - `port`: list of tunnelPorts of connected receivers, one per line
+// - `serno`: list of serial numbers of connected receivers, one per line
+
+func handleStatusConn(conn net.Conn) {
+	buff := make([]byte, 4096)
+	var lr = NewLineReader(conn, &buff)
+ConnLoop:
+	for {
+		err := lr.getLine()
+		if err != nil {
+			break
+		}
+		switch string(buff) {
+		case "json":
+			// full status in JSON
+			b, err := json.Marshal(activeSGs)
+			if err == nil {
+				_, err := conn.Write(b)
+				if err != nil {
+					break
+				}
+			} else {
+				fmt.Printf("Got err=%s when marshalling activeSGs\n", err.Error())
+			}
+		case "port", "ports":
+			// list of ports of connected SGs, one per line
+			for _, sgp := range activeSGs {
+				if sgp.Connected {
+					io.WriteString(conn, strconv.Itoa(sgp.TunnelPort) + "\n")
+				}
+			}
+		case "serno", "sernos":
+			// list of sernos of connected SGs, one per line
+			for _, sgp := range activeSGs {
+				if sgp.Connected {
+					io.WriteString(conn, string(sgp.Serno) + "\n")
+				}
+			}
+		case "who":
+			// list of sernos, ports of connected SGs, one per line
+			for _, sgp := range activeSGs {
+				if sgp.Connected {
+					io.WriteString(conn, string(sgp.Serno) + "," + strconv.Itoa(sgp.TunnelPort) + "\n")
+				}
+			}
+		case "quit":
+			// hang up
+			break ConnLoop
+		}
+	}
+	conn.Close()
+}
+
+// listen for trusted streams and dispatch them to a handler
+func StatusServer(ctx context.Context, address string) {
+	addr, err := net.ResolveTCPAddr("tcp", address)
+	if err != nil {
+		print("failed to resolve address " + address)
+		return
+	}
+	srv, err := net.ListenTCP("tcp", addr)
+	if err != nil {
+		print("failed to listen on " + address)
+		return
+	}
+	defer srv.Close()
+	for {
+		conn, err := srv.AcceptTCP()
+		if err != nil {
+			// handle error
+			print("problem accepting connection")
+			return
+		}
+		go handleStatusConn(net.Conn(conn))
+	}
+	select {
+	case <-ctx.Done():
+	}
+}
+
 func main() {
 	rand.Seed(time.Now().UnixNano())
 	var ctx, _ = context.WithCancel(context.Background())
@@ -510,6 +597,7 @@ func main() {
 	var msg = make(chan Message)
 	evtChan := make(chan SGEvent)
 	go SqliteSink(ctx, msg)
+	go StatusServer(ctx, "localhost:59025")
 	go TrustedStreamSource(ctx, "localhost:59024", msg)
 	go DgramSource(ctx, ":59022", false, msg)
 	go DgramSource(ctx, ":59023", true, msg)
