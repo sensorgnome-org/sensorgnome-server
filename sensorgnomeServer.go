@@ -504,6 +504,14 @@ func OpenDB(path string) (db *sql.DB) {
 	return
 }
 
+const (
+	CMD_WHO = iota
+	CMD_PORT
+	CMD_SERNO
+	CMD_JSON
+	CMD_QUIT
+)
+
 // Handle status requests.
 // The request is a one line format, such as "json\n".
 // The reply is a summary of active receiver status in that format.
@@ -516,47 +524,59 @@ func OpenDB(path string) (db *sql.DB) {
 func handleStatusConn(conn net.Conn) {
 	buff := make([]byte, 4096)
 	var lr = NewLineReader(conn, &buff)
+	cmds := map[string]int8{
+		"who": CMD_WHO,
+		"port": CMD_PORT,
+		"ports": CMD_PORT,
+		"serno": CMD_SERNO,
+		"sernos": CMD_SERNO,
+		"status": CMD_JSON,
+		"json": CMD_JSON,
+		"quit": CMD_QUIT}
 ConnLoop:
 	for {
 		err := lr.getLine()
 		if err != nil {
-			break
+			break ConnLoop
 		}
-		switch string(buff) {
-		case "json":
-			// full status in JSON
-			b, err := json.Marshal(activeSGs)
-			if err == nil {
-				_, err := conn.Write(b)
+		var b string
+		cmd, ok := cmds[string(buff)]
+		if ! ok {
+			b = "Error: command must be one of: "
+			for c, _ := range cmds {
+				b += "\n" + c
+			}
+
+		} else {
+			switch cmd {
+			case CMD_QUIT:
+				break ConnLoop
+			case CMD_JSON:
+				js, err := json.Marshal(activeSGs)
 				if err != nil {
-					break
+					fmt.Printf("Got err=%s when marshalling activeSGs\n", err.Error())
+					continue
 				}
-			} else {
-				fmt.Printf("Got err=%s when marshalling activeSGs\n", err.Error())
-			}
-		case "port", "ports":
-			// list of ports of connected SGs, one per line
-			for _, sgp := range activeSGs {
-				if sgp.Connected {
-					io.WriteString(conn, strconv.Itoa(sgp.TunnelPort) + "\n")
-				}
-			}
-		case "serno", "sernos":
-			// list of sernos of connected SGs, one per line
-			for _, sgp := range activeSGs {
-				if sgp.Connected {
-					io.WriteString(conn, string(sgp.Serno) + "\n")
-				}
-			}
-		case "who":
-			// list of sernos, ports of connected SGs, one per line
-			for _, sgp := range activeSGs {
-				if sgp.Connected {
-					io.WriteString(conn, string(sgp.Serno) + "," + strconv.Itoa(sgp.TunnelPort) + "\n")
+				b = string(js)
+			case CMD_WHO, CMD_PORT, CMD_SERNO:
+				for _, sgp := range activeSGs {
+					if sgp.Connected {
+						if cmd == CMD_SERNO || cmd == CMD_WHO {
+							b += string(sgp.Serno)
+						}
+						if cmd == CMD_WHO {
+							b += ","
+						}
+						if cmd == CMD_PORT || cmd == CMD_WHO {
+							b += strconv.Itoa(sgp.TunnelPort)
+						}
+						b += "\n"
+					}
 				}
 			}
-		case "quit":
-			// hang up
+		}
+		_, err = io.WriteString(conn, b)
+		if err != nil {
 			break ConnLoop
 		}
 	}
