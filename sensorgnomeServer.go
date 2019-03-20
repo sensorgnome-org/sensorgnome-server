@@ -45,12 +45,12 @@ type Serno string
 
 // an SG we have seen recently
 type ActiveSG struct {
-	serno      Serno     // serial number; e.g. "SG-1234BBBK9812"
-	tsConn     time.Time // time at which connected
-	tsLastSync time.Time // time at which last synced with motus
-	tsNextSync time.Time // time at which next to be synced with motus
-	tunnelPort int       // ssh tunnel port, if applicable
-	connected  bool      // actually connected?  once we've seen a receiver, we keep this struct in memory,
+	Serno      Serno     // serial number; e.g. "SG-1234BBBK9812"
+	TsConn     time.Time // time at which connected
+	TsLastSync time.Time // time at which last synced with motus
+	TsNextSync time.Time // time at which next to be synced with motus
+	TunnelPort int       // ssh tunnel port, if applicable
+	Connected  bool      // actually connected?  once we've seen a receiver, we keep this struct in memory,
 	                     // but set this field to false when it disconnects
 }
 
@@ -144,15 +144,15 @@ func handleTrustedStream(conn net.Conn, dst chan<- Message) {
 }
 
 // listen for trusted streams and dispatch them to a handler
-func trustedStreamSource(ctx context.Context, address string, dst chan<- Message) {
+func TrustedStreamSource(ctx context.Context, address string, dst chan<- Message) {
 	addr, err := net.ResolveTCPAddr("tcp", address)
 	if err != nil {
-		print("failed to resolve address localhost:59024")
+		print("failed to resolve address " + address)
 		return
 	}
 	srv, err := net.ListenTCP("tcp", addr)
 	if err != nil {
-		print("failed to listen on port 59024")
+		print("failed to listen on " + address)
 		return
 	}
 	defer srv.Close()
@@ -175,7 +175,7 @@ func trustedStreamSource(ctx context.Context, address string, dst chan<- Message
 // Datagrams from an untrusted port have their signature checked
 // and are discarded if this is not valid.
 // Datagrams are passed to the dst channel as Messages.
-func dgramSource(ctx context.Context, address string, trusted bool, dst chan<- Message) {
+func DgramSource(ctx context.Context, address string, trusted bool, dst chan<- Message) {
 	pc, err := net.ListenPacket("udp", address)
 	if err != nil {
 		print("failed to listen on port " + address)
@@ -216,7 +216,7 @@ func messageDump(src <-chan Message) {
 
 // Goroutine that accepts Messages and stores them in an sqlite
 // table called "messages" in the global DB.
-func sqliteSink(ctx context.Context, src <-chan Message) {
+func SqliteSink(ctx context.Context, src <-chan Message) {
 	stmt, err := DB.Prepare("INSERT INTO messages (ts, sender, message) VALUES (?, ?, ?)")
 	if err != nil {
 		log.Fatal(err)
@@ -314,15 +314,15 @@ func ConnectionWatcher(ctx context.Context, dir string, sernoRE string, sink SGE
 					if event.Op&fsnotify.Create == fsnotify.Create {
 						if _, ok = activeSGs[serno]; !ok {
 							// an SG we haven't seen before during this server session
-							activeSGs[serno] = &ActiveSG{serno: serno, tsConn: now, tsLastSync: SGSyncTime(serno), tunnelPort: TunnelPort(serno), connected: true}
+							activeSGs[serno] = &ActiveSG{Serno: serno, TsConn: now, TsLastSync: SGSyncTime(serno), TunnelPort: TunnelPort(serno), Connected: true}
 						} else {
 							// SG already on active list, so just update connection time and status
-							activeSGs[serno].tsConn = now
-							activeSGs[serno].connected = true
+							activeSGs[serno].TsConn = now
+							activeSGs[serno].Connected = true
 						}
 						sink <- SGEvent{serno, now, SGConnect}
 					} else if event.Op&fsnotify.Remove == fsnotify.Remove {
-						activeSGs[serno].connected = false
+						activeSGs[serno].Connected = false
 						sink <- SGEvent{serno, now, SGDisconnect}
 					}
 				}
@@ -342,7 +342,7 @@ func ConnectionWatcher(ctx context.Context, dir string, sernoRE string, sink SGE
 			parts := re.FindStringSubmatch(finfo.Name())
 			if parts != nil {
 				serno := Serno(parts[1])
-				activeSGs[serno] = &ActiveSG{serno: serno, tsConn: finfo.ModTime(), tsLastSync: SGSyncTime(serno), tunnelPort: TunnelPort(serno), connected: true}
+				activeSGs[serno] = &ActiveSG{Serno: serno, TsConn: finfo.ModTime(), TsLastSync: SGSyncTime(serno), TunnelPort: TunnelPort(serno), Connected: true}
 				sink <- SGEvent{Serno(parts[1]), finfo.ModTime(), SGConnect}
 			}
 		}
@@ -375,18 +375,18 @@ func SyncWorker(ctx context.Context, serno Serno, msg chan<- Message) {
 		return
 	}
 	cp := fmt.Sprintf("-oControlPath=%s", MotusControlPath)
-	pf := fmt.Sprintf("-R%d:localhost:%d", sg.tunnelPort, sg.tunnelPort)
-	tf := fmt.Sprintf(MotusSyncTemplate, sg.tunnelPort, string(serno))
+	pf := fmt.Sprintf("-R%d:localhost:%d", sg.TunnelPort, sg.TunnelPort)
+	tf := fmt.Sprintf(MotusSyncTemplate, sg.TunnelPort, string(serno))
 
 	for {
 		// set up a wait uniformly distributed between lo and hi times
 		delay := time.Duration(SyncWaitLo + rand.Int31n(SyncWaitHi-SyncWaitLo)) * time.Minute
 		wait := time.NewTimer(delay)
-		sg.tsNextSync = time.Now().Add(delay)
+		sg.TsNextSync = time.Now().Add(delay)
 		select {
 		case synctime := <-wait.C:
 			// if receiver is not still connected, end this goroutine
-			if !activeSGs[serno].connected {
+			if !activeSGs[serno].Connected {
 				return
 			}
 			cmd := exec.Command("ssh", "-i", MotusUserKey, "-f", "-N", "-T",
@@ -402,7 +402,7 @@ func SyncWorker(ctx context.Context, serno Serno, msg chan<- Message) {
 				cp, MotusUser, "touch", tf)
 			err = cmd.Run()
 			if err == nil {
-				activeSGs[serno].tsLastSync = synctime
+				activeSGs[serno].TsLastSync = synctime
 				msg <- Message{sender: string(serno), text: strconv.Itoa(int(SGSync))}
 			} else {
 				fmt.Println(err.Error())
@@ -509,10 +509,10 @@ func main() {
 	DB = OpenDB(SGDBFile)
 	var msg = make(chan Message)
 	evtChan := make(chan SGEvent)
-	go sqliteSink(ctx, msg)
-	go trustedStreamSource(ctx, "localhost:59024", msg)
-	go dgramSource(ctx, ":59022", false, msg)
-	go dgramSource(ctx, ":59023", true, msg)
+	go SqliteSink(ctx, msg)
+	go TrustedStreamSource(ctx, "localhost:59024", msg)
+	go DgramSource(ctx, ":59022", false, msg)
+	go DgramSource(ctx, ":59023", true, msg)
 	//	go messageDump(msg)
 	go EventManager(ctx, evtChan, msg)
 	ConnectionWatcher(ctx, ConnectionSemPath, ConnectionSemRE, evtChan)
