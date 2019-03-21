@@ -17,7 +17,7 @@
 //               |                      |
 // publisher ----+                      +-------> subscriber queue (3) --[viewer]--> chan for subscriber 3
 //
-// [bcaster] is a goroutine to move (and replicate) each message from the publish queue to the queues of all interested subscribers
+// [bcaster] is a goroutine to move each message from the publish queue to the queues of all interested subscribers
 // [viewer] is a goroutine to move messages from a subscriber's queue to its channel
 //
 
@@ -37,19 +37,17 @@ type Msg struct {
 	Msg   interface{}
 }
 
-// Queues hold pointers to messages, to avoid copying
+// Queues hold pointers to messages
 type PMsg *Msg
 
 // a type representing a subscriber
+//
 // The client who subscribes receives a `<-chan Msg`, which also
 // serves as a handle to this (opaque) structure.
-
 type subr struct {
-	msgs  *fifo.Queue    // fifo of messages published and wanted (at the time of publication)
-	// but not yet read from the message channel by the client
-	send     chan PMsg // channel on which subscriber receives messages
-	haveMsgs chan bool // channel on which carrier waits to learn there are msgs to distribute
-	// when this channel closes, the subscriber's viewer goroutine terminates
+	msgs     *fifo.Queue // queue of messages waiting to be read by client
+	send     chan PMsg   // channel on which subscriber receives messages
+	haveMsgs chan bool   // channel on which viewer goroutine waits to learn there are messages to distribute
 }
 
 // it would be nice to define `type MsgChan chan Msg` and then
@@ -58,49 +56,47 @@ type subr struct {
 
 // a type representing the message bus
 type Mbus struct {
-	msgs     *fifo.Queue           // queue of pointers to messages published but not yet distributed
-	subs     map[<-chan PMsg]*subr // keep track of subscribers by the channel we return to them
-	wants    map[Topic]map[*subr]bool     // pointers to subscribers for each Topic
-	subsLock sync.Mutex            // lock for subscriber modifications
-	wakeLock sync.Mutex            // lock for the waking up the distributor channel
-	haveMsgs chan bool             // channel distributor waits on to indicate there are messages to distribute
-	// when this channel closes, the message bus is terminated and all subscriber goroutines ended
+	msgs     *fifo.Queue              // queue of messages published but not yet distributed
+	subs     map[<-chan PMsg]*subr    // keep track of subscribers by the channel we return to them
+	wants    map[Topic]map[*subr]bool // pointers to subscribers (and yes/no) for each Topic
+	subsLock sync.Mutex               // lock for subscriber modifications
+	wakeLock sync.Mutex               // lock for the waking up the distributor channel
+	haveMsgs chan bool                // channel on which bcaster goroutine waits to learn there are messages to distribute
+	closed   bool                     // false until Close() is called.
 }
 
 // constructor for a message bus
 func NewMbus() (mb Mbus) {
-	mb = Mbus{msgs: fifo.NewQueue(), subs: make(map[<-chan PMsg]*subr, 10), wants: make(map[Topic]map[*subr]bool), haveMsgs: make(chan bool, 1)}
+	mb = Mbus{msgs: fifo.NewQueue(), subs: make(map[<-chan PMsg]*subr, 10), wants: make(map[Topic]map[*subr]bool), haveMsgs: make(chan bool, 1), closed: false}
 	// start the goroutine to distribute messages from the publish queue to the
 	// subscriber queues
 	go mb.bcaster()
 	return
 }
 
-// add a subscriber to a topic
-// only called internally by callers who have
-// locked mb.subsLock
-func (mb *Mbus) sub(topic Topic, sb *subr) {
-	_, ok := mb.wants[topic]
-	if ! ok {
-		mb.wants[topic] = make(map[*subr]bool)
-	}
-	mb.wants[topic][sb] = true
-}
-
-// remove a subscriber from a topic
-// only called internally by callers who have
-// locked mb.subsLock
-func (mb *Mbus) unsub(topic Topic, sb *subr) {
-	_, ok := mb.wants[topic]
-	if ! ok {
+// tell message bus it is no longer needed
+//
+// This will end the bcaster and all viewer goroutines.
+// All subscribers will have their message channels closed.
+// After calling this method, calls to Sub, Add, Done, and
+// Close
+func (mb *Mbus) Close() {
+	if mb.closed {
 		return
 	}
-	mb.wants[topic][sb] = false
+	close(mb.haveMsgs)
+	mb.subsLock.Lock()
+	for _, sub := range mb.subs {
+		close(sub.haveMsgs)
+	}
+	mb.closed = true
 }
-
 
 // create a subscriber to one or more topics of interest
 func (mb *Mbus) Sub(topic ...Topic) (sc <-chan PMsg) {
+	if mb.closed {
+		return nil
+	}
 	mb.subsLock.Lock()
 	defer mb.subsLock.Unlock()
 	sub := &subr{msgs: fifo.NewQueue(), send: make(chan PMsg), haveMsgs: make(chan bool, 1)}
@@ -119,6 +115,9 @@ func (mb *Mbus) Sub(topic ...Topic) (sc <-chan PMsg) {
 //
 // Returns true on success, false otherwise
 func (mb *Mbus) Add(c <-chan PMsg, topic ...Topic) bool {
+	if mb.closed {
+		return false
+	}
 	mb.subsLock.Lock()
 	defer mb.subsLock.Unlock()
 	if s, ok := mb.subs[c]; ok {
@@ -136,6 +135,9 @@ func (mb *Mbus) Add(c <-chan PMsg, topic ...Topic) bool {
 // channel can exist without any subscriptions.  Reads from it
 // will then always block.
 func (mb *Mbus) Drop(c <-chan PMsg, topic ...Topic) bool {
+	if mb.closed {
+		return false
+	}
 	mb.subsLock.Lock()
 	defer mb.subsLock.Unlock()
 	if s, ok := mb.subs[c]; ok {
@@ -147,10 +149,41 @@ func (mb *Mbus) Drop(c <-chan PMsg, topic ...Topic) bool {
 	return false
 }
 
+// add a subscriber to a topic
+//
+// only used by internal callers who have
+// locked mb.subsLock
+func (mb *Mbus) sub(topic Topic, sb *subr) {
+	_, ok := mb.wants[topic]
+	if !ok {
+		mb.wants[topic] = make(map[*subr]bool)
+	}
+	mb.wants[topic][sb] = true
+}
+
+// remove a subscriber from a topic
+//
+// only used by internal callers who have
+// locked mb.subsLock
+func (mb *Mbus) unsub(topic Topic, sb *subr) {
+	_, ok := mb.wants[topic]
+	if !ok {
+		return
+	}
+	delete(mb.wants[topic], sb)
+	if len(mb.wants[topic]) == 0 {
+		delete(mb.wants, topic)
+	}
+}
+
 // get number of topics subscribed to
-// if c is not a valid message channel for mb,
-// return -1
+//
+// If c is not a valid message channel for mb,
+// return -1.
 func (mb *Mbus) NumTopics(c <-chan PMsg) int {
+	if mb.closed {
+		return -1
+	}
 	mb.subsLock.Lock()
 	defer mb.subsLock.Unlock()
 	if s, ok := mb.subs[c]; ok {
@@ -166,7 +199,14 @@ func (mb *Mbus) NumTopics(c <-chan PMsg) int {
 }
 
 // return topics subscribed to as a slice of strings
+//
+// returns an empty slice if either the Mbus is
+// closed or c is not a valid Message channel
+// pointer, or if the subscriber has no topics.
 func (mb *Mbus) Topics(c <-chan PMsg) []Topic {
+	if mb.closed {
+		return make([]Topic, 0)
+	}
 	mb.subsLock.Lock()
 	defer mb.subsLock.Unlock()
 	if s, ok := mb.subs[c]; ok {
@@ -182,10 +222,15 @@ func (mb *Mbus) Topics(c <-chan PMsg) []Topic {
 }
 
 // publish a message
+//
 // The message is added to the publisher queue and then a
 // bool is sent down the haveMsgs channel to (possibly) wake
-// the distor goroutine.
-func (mb *Mbus) Pub(m Msg) {
+// the bcaster goroutine.  Returns true on success, false
+// otherwise, e.g. if the Mbus has already been Close()d
+func (mb *Mbus) Pub(m Msg) bool {
+	if mb.closed {
+		return false
+	}
 	// add message to publisher queue (locking happens within
 	// the fifo code)
 	mb.msgs.Add(PMsg(&m))
@@ -194,23 +239,32 @@ func (mb *Mbus) Pub(m Msg) {
 	mb.wakeLock.Lock()
 	defer mb.wakeLock.Unlock()
 	// ensure the haveMsgs channel contains an item
-	// to force the distor to wakeup
+	// to force the bcaster to wakeup
 	if len(mb.haveMsgs) == 0 {
 		mb.haveMsgs <- true
 	}
+	return true
 }
 
 // goroutine to distribute messages from the publish queue to
-// the input queue of all interested subscribers
+// the input queue of all interested subscribers.
+//
+// When the haveMsgs channel is closed, this goroutine will
+// exit, possibly after draining its queue
 func (mb *Mbus) bcaster() {
-	for _ = range mb.haveMsgs {
+	for {
+		if _, ok := <-mb.haveMsgs; !ok {
+			return
+		}
 		// whenever a receive from haveMsgs succeeds, it means
 		// there might be messages in the queue
 		mb.subsLock.Lock()
-		for mb.msgs.Len() > 0 {
-			msg := mb.msgs.Next().(PMsg)
-			// lock the subscribers list and look for those wanting
-			// this message topic
+		for {
+			m := mb.msgs.Next()
+			if m == nil {
+				break
+			}
+			msg := m.(PMsg)
 			if w, ok := mb.wants[msg.Topic]; ok {
 				for sub, want := range w {
 					if want {
@@ -229,13 +283,24 @@ func (mb *Mbus) bcaster() {
 }
 
 // goroutine to send desired messages to subscriber's channel
+//
+// When the subscriber's haveMsgs channel is closed, this
+// goroutine will close the client's message channel and
+// exit, possibly after draining its queue.
 func (sub *subr) viewer() {
-	for _ = range sub.haveMsgs {
+	for {
+		if _, ok := <-sub.haveMsgs; !ok {
+			break
+		}
 		// whenever a receive from haveMsgs succeeds, it means
 		// there might be messages in the queue
-		for sub.msgs.Len() > 0 {
-			msg := sub.msgs.Next().(PMsg)
-			sub.send <- msg
+		for {
+			msg := sub.msgs.Next()
+			if msg == nil {
+				break
+			}
+			sub.send <- msg.(PMsg)
 		}
 	}
+	close(sub.send)
 }
