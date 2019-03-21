@@ -48,9 +48,15 @@ func main() {
 	// generate 30 random consumers; consumer i subscribes to
 	// messages whose topic is an integer multiple of i <= 100
 	for i:= 1; i <= 30; i++ {
-		c := mb.Sub(mbus.Topic(strconv.Itoa(i)))
-		for j:= i*2; j <= 100; j += i {
+		c := mb.Sub(mbus.Topic(strconv.Itoa(i)), mbus.Topic(strconv.Itoa(2*i)))
+		for j:= i*3; j <= 100; j += i {
 			mb.Add(c, mbus.Topic(strconv.Itoa(j)))
+		}
+		if i == 12 {
+			fmt.Printf("consumer %d wants these %d topics:\n", i, mb.NumTopics(c))
+			for _,t := range mb.Topics(c) {
+				fmt.Printf("   %s\n", t)
+			}
 		}
 		go consumer(i, c)
 	}

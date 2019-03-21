@@ -99,12 +99,14 @@ func (mb *Mbus) unsub(topic Topic, sb *subr) {
 }
 
 
-// create a subscriber to a topic of interest
-func (mb *Mbus) Sub(topic Topic) (sc <-chan PMsg) {
+// create a subscriber to one or more topics of interest
+func (mb *Mbus) Sub(topic ...Topic) (sc <-chan PMsg) {
 	mb.subsLock.Lock()
 	defer mb.subsLock.Unlock()
 	sub := &subr{msgs: fifo.NewQueue(), send: make(chan PMsg), haveMsgs: make(chan bool, 1)}
-	mb.sub(topic, sub)
+	for _, t := range topic {
+		mb.sub(t, sub)
+	}
 	sc = sub.send
 	mb.subs[sc] = sub
 	// start the goroutine that moves messages from the queue (where the bcaster puts them)
@@ -113,27 +115,33 @@ func (mb *Mbus) Sub(topic Topic) (sc <-chan PMsg) {
 	return
 }
 
-// add a topic to an existing subscriber
+// add one or more topics to an existing subscriber
+//
 // Returns true on success, false otherwise
-func (mb *Mbus) Add(c <-chan PMsg, topic Topic) bool {
+func (mb *Mbus) Add(c <-chan PMsg, topic ...Topic) bool {
 	mb.subsLock.Lock()
 	defer mb.subsLock.Unlock()
 	if s, ok := mb.subs[c]; ok {
-		mb.sub(topic, s)
+		for _, t := range topic {
+			mb.sub(t, s)
+		}
 		return true
 	}
 	return false
 }
 
-// remove a topic from an existing subscriber message channel
-// returns true on sucess, false otherwise.  Note that a message
+// remove one or more topics from an existing subscriber message channel
+//
+// Returns true on sucess, false otherwise.  Note that a message
 // channel can exist without any subscriptions.  Reads from it
 // will then always block.
-func (mb *Mbus) Drop(c <-chan PMsg, topic Topic) bool {
+func (mb *Mbus) Drop(c <-chan PMsg, topic ...Topic) bool {
 	mb.subsLock.Lock()
 	defer mb.subsLock.Unlock()
 	if s, ok := mb.subs[c]; ok {
-		mb.unsub(topic, s)
+		for _, t := range topic {
+			mb.unsub(t, s)
+		}
 		return true
 	}
 	return false
