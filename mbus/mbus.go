@@ -45,8 +45,6 @@ type PMsg *Msg
 // serves as a handle to this (opaque) structure.
 
 type subr struct {
-	wants map[Topic]bool // topics of messages wanted by subscriber
-	lock  sync.Mutex     // lock for the `wants` map
 	msgs  *fifo.Queue    // fifo of messages published and wanted (at the time of publication)
 	// but not yet read from the message channel by the client
 	send     chan PMsg // channel on which subscriber receives messages
@@ -62,6 +60,7 @@ type subr struct {
 type Mbus struct {
 	msgs     *fifo.Queue           // queue of pointers to messages published but not yet distributed
 	subs     map[<-chan PMsg]*subr // keep track of subscribers by the channel we return to them
+	wants    map[Topic]map[*subr]bool     // pointers to subscribers for each Topic
 	subsLock sync.Mutex            // lock for subscriber modifications
 	wakeLock sync.Mutex            // lock for the waking up the distributor channel
 	haveMsgs chan bool             // channel distributor waits on to indicate there are messages to distribute
@@ -70,19 +69,42 @@ type Mbus struct {
 
 // constructor for a message bus
 func NewMbus() (mb Mbus) {
-	mb = Mbus{msgs: fifo.NewQueue(), subs: make(map[<-chan PMsg]*subr, 10), haveMsgs: make(chan bool, 1)}
+	mb = Mbus{msgs: fifo.NewQueue(), subs: make(map[<-chan PMsg]*subr, 10), wants: make(map[Topic]map[*subr]bool), haveMsgs: make(chan bool, 1)}
 	// start the goroutine to distribute messages from the publish queue to the
 	// subscriber queues
 	go mb.bcaster()
 	return
 }
 
+// add a subscriber to a topic
+// only called internally by callers who have
+// locked mb.subsLock
+func (mb *Mbus) sub(topic Topic, sb *subr) {
+	_, ok := mb.wants[topic]
+	if ! ok {
+		mb.wants[topic] = make(map[*subr]bool)
+	}
+	mb.wants[topic][sb] = true
+}
+
+// remove a subscriber from a topic
+// only called internally by callers who have
+// locked mb.subsLock
+func (mb *Mbus) unsub(topic Topic, sb *subr) {
+	_, ok := mb.wants[topic]
+	if ! ok {
+		return
+	}
+	mb.wants[topic][sb] = false
+}
+
+
 // create a subscriber to a topic of interest
 func (mb *Mbus) Sub(topic Topic) (sc <-chan PMsg) {
 	mb.subsLock.Lock()
 	defer mb.subsLock.Unlock()
-	sub := &subr{wants: make(map[Topic]bool, 10), msgs: fifo.NewQueue(), send: make(chan PMsg), haveMsgs: make(chan bool, 1)}
-	sub.wants[topic] = true
+	sub := &subr{msgs: fifo.NewQueue(), send: make(chan PMsg), haveMsgs: make(chan bool, 1)}
+	mb.sub(topic, sub)
 	sc = sub.send
 	mb.subs[sc] = sub
 	// start the goroutine that moves messages from the queue (where the bcaster puts them)
@@ -97,9 +119,7 @@ func (mb *Mbus) Add(c <-chan PMsg, topic Topic) bool {
 	mb.subsLock.Lock()
 	defer mb.subsLock.Unlock()
 	if s, ok := mb.subs[c]; ok {
-		s.lock.Lock()
-		defer s.lock.Unlock()
-		s.wants[topic] = true
+		mb.sub(topic, s)
 		return true
 	}
 	return false
@@ -113,9 +133,7 @@ func (mb *Mbus) Drop(c <-chan PMsg, topic Topic) bool {
 	mb.subsLock.Lock()
 	defer mb.subsLock.Unlock()
 	if s, ok := mb.subs[c]; ok {
-		s.lock.Lock()
-		defer s.lock.Unlock()
-		delete(s.wants, topic)
+		mb.unsub(topic, s)
 		return true
 	}
 	return false
@@ -128,7 +146,13 @@ func (mb *Mbus) NumTopics(c <-chan PMsg) int {
 	mb.subsLock.Lock()
 	defer mb.subsLock.Unlock()
 	if s, ok := mb.subs[c]; ok {
-		return len(s.wants)
+		n := 0
+		for _, m := range mb.wants {
+			if m[s] {
+				n += 1
+			}
+		}
+		return n
 	}
 	return -1
 }
@@ -138,11 +162,11 @@ func (mb *Mbus) Topics(c <-chan PMsg) []Topic {
 	mb.subsLock.Lock()
 	defer mb.subsLock.Unlock()
 	if s, ok := mb.subs[c]; ok {
-		rv := make([]Topic, len(s.wants))
-		i := 0
-		for t, _ := range s.wants {
-			rv[i] = t
-			i++
+		rv := make([]Topic, 0, 10)
+		for t, m := range mb.wants {
+			if m[s] {
+				rv = append(rv, t)
+			}
 		}
 		return rv
 	}
@@ -174,25 +198,25 @@ func (mb *Mbus) bcaster() {
 	for _ = range mb.haveMsgs {
 		// whenever a receive from haveMsgs succeeds, it means
 		// there might be messages in the queue
+		mb.subsLock.Lock()
 		for mb.msgs.Len() > 0 {
 			msg := mb.msgs.Next().(PMsg)
 			// lock the subscribers list and look for those wanting
 			// this message topic
-			mb.subsLock.Lock()
-			for _, sub := range mb.subs {
-				sub.lock.Lock()
-				if sub.wants[msg.Topic] {
-					sub.msgs.Add(msg)
-					// ensure the haveMsgs channel contains an item
-					// to force the carrier to wake up
-					if len(sub.haveMsgs) == 0 {
-						sub.haveMsgs <- true
+			if w, ok := mb.wants[msg.Topic]; ok {
+				for sub, want := range w {
+					if want {
+						sub.msgs.Add(msg)
+						// ensure the haveMsgs channel contains an item
+						// to force the carrier to wake up
+						if len(sub.haveMsgs) == 0 {
+							sub.haveMsgs <- true
+						}
 					}
 				}
-				sub.lock.Unlock()
 			}
-			mb.subsLock.Unlock()
 		}
+		mb.subsLock.Unlock()
 	}
 }
 
