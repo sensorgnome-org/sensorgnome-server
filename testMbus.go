@@ -1,6 +1,6 @@
 package main
 
-// test the mbus package
+// simple test of the mbus package
 
 import (
 	"math/rand"
@@ -63,7 +63,16 @@ func main() {
 	for i:= 1; i <= 30; i++ {
 		go producer(i, i, &mb)
 	}
-	// sleep for one second so producers can add to wait group
-	time.Sleep(time.Second)
-	wg.Wait()
+	// can do only one of the two following
+	if rand.Intn(2) == 1 {
+		// sleep for one second so producers can add to wait group
+		time.Sleep(time.Second)
+		fmt.Println("Slept for 1s; now waiting for all messages to be received")
+		wg.Wait()
+	} else {
+		// sleep a shorter time, then close
+		time.Sleep(time.Millisecond * 10)
+		fmt.Println("Slept for 10 ms; now closing mbus")
+		mb.Close()
+	}
 }
