@@ -61,6 +61,7 @@ const (
 	MsgSGSync        = "2" // data sync with motus.org was launched
 	MsgSGSyncPending = "3" // data sync with motus.org has been scheduled for a future time
 	MsgSGActivate    = "4" // receiver has connected *and* had its info read from DB
+	MsgStatusChange  = "5"
 	MsgGPS           = "G" // from SG: GPS fix
 	MsgMachineInfo   = "M" // from SG: machine information
 	MsgTimeSync      = "C" // from SG: time sync
@@ -237,29 +238,23 @@ func DgramSource(ctx context.Context, address string, trusted bool) {
 }
 
 // DEBUG: A goroutine to dump Msgs
-func messageDump(ctx context.Context) {
+func messageDump() {
 	evt := Bus.Sub("*")
 	go func() {
-	MsgLoop:
-		for {
-			select {
-			case msg, ok := <-evt.Msgs():
-				if !ok {
-					break MsgLoop
-				}
-				m := msg.Msg.(SGMsg)
-				fmt.Printf("%s: %s,%s,%s\n", msg.Topic, m.ts, m.sender, m.text)
-			case <-ctx.Done():
-				break
+		defer evt.Unsub("*")
+		for msg := range evt.Msgs() {
+			if msg.Msg == nil {
+				continue
 			}
+			m := msg.Msg.(SGMsg)
+			fmt.Printf("%s: %s,%s,%s\n", msg.Topic, m.ts, m.sender, m.text)
 		}
-		evt.Unsub("*")
 	}()
 }
 
 // Goroutine that records (some) messages to a
 // table called "messages" in the global DB.
-func DBRecorder(ctx context.Context) {
+func DBRecorder() {
 	stmt, err := DB.Prepare("INSERT INTO messages (ts, sender, message) VALUES (?, ?, ?)")
 	if err != nil {
 		log.Fatal(err)
@@ -269,32 +264,26 @@ func DBRecorder(ctx context.Context) {
 	go func() {
 		// create closure that uses stmt, db
 		defer stmt.Close()
-	MsgLoop:
-		for {
-			select {
-			case msg, ok := <-evt.Msgs():
-				if !ok {
-					break MsgLoop
-				}
-				m := msg.Msg.(SGMsg)
-				ts, sender, text := m.ts, m.sender, m.text
-				// fill in defaults
-				if ts.IsZero() {
-					ts = time.Now()
-				}
-				if text == "" {
-					text = string(msg.Topic)
-				}
-				// record timestamp in DB as double seconds;
-				_, err := stmt.Exec(float64(ts.UnixNano())/1.0E9, sender, text)
-				if err != nil {
-					log.Fatal(err)
-				}
-			case <-ctx.Done():
-				break
+		defer evt.Unsub("*")
+		for msg := range evt.Msgs() {
+			if msg.Msg == nil {
+				continue
+			}
+			m := msg.Msg.(SGMsg)
+			ts, sender, text := m.ts, m.sender, m.text
+			// fill in defaults
+			if ts.IsZero() {
+				ts = time.Now()
+			}
+			if text == "" {
+				text = string(msg.Topic)
+			}
+			// record timestamp in DB as double seconds;
+			_, err := stmt.Exec(float64(ts.UnixNano())/1.0E9, sender, text)
+			if err != nil {
+				log.Fatal(err)
 			}
 		}
-		evt.Unsub("*")
 	}()
 }
 
@@ -425,58 +414,43 @@ func ConnectionWatcher(ctx context.Context, dir string, sgRE string) {
 
 // goroutine to maintain a list of active SGs and their status
 //
-// Subscribes to all messages but only handles those with a valid
-// SGserno as sender.
+// publishes an MsgStatusChange message when anything changes
 
-func SGMinder(ctx context.Context) {
-	evt := Bus.Sub("*")
+func SGMinder() {
+	evt := Bus.Sub(MsgSGConnect, MsgSGDisconnect, MsgSGSync, MsgSGSyncPending)
 	go func() {
-	MsgLoop:
-		for {
-			select {
-			case msg, ok := <-evt.Msgs():
-				t, m := MsgTopic(msg.Topic), msg.Msg.(SGMsg)
-				if t == MsgSGActivate {
-					// ignore this message, as we are the one who
-					// generates it
-					continue MsgLoop
-				}
-				if !SernoRegexp.MatchString(m.sender) {
-					// not an SG message
-					continue MsgLoop
-				}
-				serno := Serno(m.sender)
-				sgp, ok := activeSGs.Load(serno)
+		defer evt.Unsub("*")
+		for msg := range evt.Msgs() {
+			t, m := MsgTopic(msg.Topic), msg.Msg.(SGMsg)
+			serno := Serno(m.sender)
+			sgp, ok := activeSGs.Load(serno)
 
-				if !ok {
-					// not in current list, so populate what is known from DB
-					if t != MsgSGConnect {
-						panic("received non-connect message for not-yet-seen SG" + serno)
-					}
-					newsg := (&ActiveSG{Serno: serno, TsConn: m.ts, Connected: true}).FromDB()
-					sgp = newsg
-					activeSGs.Store(serno, sgp)
+			if !ok {
+				// not in current list, so populate what is known from DB
+				if t != MsgSGConnect {
+					panic("received non-connect message for not-yet-seen SG" + serno)
 				}
-				Bus.Pub(mbus.Msg{MsgSGActivate, SGMsg{sender: string(serno)}})
-				sg := sgp.(*ActiveSG)
-				sg.lock.Lock()
-				switch t {
-				case MsgSGConnect:
-					sg.TsConn = m.ts
-					sg.Connected = true
-				case MsgSGDisconnect:
-					sg.Connected = false
-				case MsgSGSync:
-					sg.TsLastSync = m.ts
-				case MsgSGSyncPending:
-					sg.TsNextSync = m.ts
-				}
-				sg.lock.Unlock()
-			case <-ctx.Done():
-				break
+				newsg := (&ActiveSG{Serno: serno, TsConn: m.ts, Connected: true}).FromDB()
+				sgp = newsg
+				activeSGs.Store(serno, sgp)
 			}
+			Bus.Pub(mbus.Msg{MsgSGActivate, SGMsg{sender: string(serno)}})
+			sg := sgp.(*ActiveSG)
+			sg.lock.Lock()
+			switch t {
+			case MsgSGConnect:
+				sg.TsConn = m.ts
+				sg.Connected = true
+			case MsgSGDisconnect:
+				sg.Connected = false
+			case MsgSGSync:
+				sg.TsLastSync = m.ts
+			case MsgSGSyncPending:
+				sg.TsNextSync = m.ts
+			}
+			sg.lock.Unlock()
+			Bus.Pub(mbus.Msg{MsgStatusChange, nil})
 		}
-		evt.Unsub("*")
 	}()
 }
 
@@ -494,11 +468,16 @@ func SyncWorker(ctx context.Context, serno Serno) {
 	pf := fmt.Sprintf("-R%d:localhost:%d", sg.TunnelPort, sg.TunnelPort)
 	tf := fmt.Sprintf(MotusSyncTemplate, sg.TunnelPort, string(serno))
 	sg.lock.Unlock()
+	var wait *time.Timer
 SyncLoop:
 	for {
 		// set up a wait uniformly distributed between lo and hi times
 		delay := time.Duration(SyncWaitLo+rand.Int31n(SyncWaitHi-SyncWaitLo)) * time.Minute
-		wait := time.NewTimer(delay)
+		if wait == nil {
+			wait = time.NewTimer(delay)
+		} else {
+			wait.Reset(delay)
+		}
 		Bus.Pub(mbus.Msg{MsgSGSyncPending, SGMsg{sender: string(serno), ts: time.Now().Add(delay)}})
 		select {
 		case synctime := <-wait.C:
@@ -542,36 +521,30 @@ SyncLoop:
 // - `SGDisconnect`: stop the asssociated SyncWorker
 //
 
-func SyncManager(ctx context.Context) {
+func SyncManager() {
 	syncCancels := make(map[Serno]context.CancelFunc)
 	evt := Bus.Sub(MsgSGActivate, MsgSGDisconnect)
 	go func() {
-	ConnLoop:
-		for {
-			select {
-			case e, ok := <-evt.Msgs():
-				if ok {
-					m := e.Msg.(SGMsg)
-					serno := Serno(m.sender)
-					_, have := syncCancels[serno]
-					switch e.Topic {
-					case MsgSGActivate:
-						if have {
-							continue ConnLoop
-						}
-						newctx, cf := context.WithCancel(ctx)
-						syncCancels[serno] = cf
-						go SyncWorker(newctx, serno)
-					case MsgSGDisconnect:
-						if !have {
-							continue ConnLoop
-						}
-						syncCancels[serno]()
-						delete(syncCancels, serno)
-					}
+		defer evt.Unsub("*")
+		MsgLoop:
+		for e := range evt.Msgs() {
+			m := e.Msg.(SGMsg)
+			serno := Serno(m.sender)
+			_, have := syncCancels[serno]
+			switch e.Topic {
+			case MsgSGActivate:
+				if have {
+					continue MsgLoop
 				}
-			case <-ctx.Done():
-				break ConnLoop
+				newctx, cf := context.WithCancel(context.Background())
+				syncCancels[serno] = cf
+				go SyncWorker(newctx, serno)
+			case MsgSGDisconnect:
+				if !have {
+					continue MsgLoop
+				}
+				syncCancels[serno]()
+				delete(syncCancels, serno)
 			}
 		}
 		// closing, so shut down all sync goroutines
@@ -784,9 +757,47 @@ func StatusServer(ctx context.Context, address string) {
 	}
 }
 
-// func StatusPageGenerator(ctx context.Context, path string, regen <-chan bool) {
-// 	MotusRefreshMetadata()
-// }
+// regenerate the main status page when StatusChange messages are received
+//
+// `latency` is the maximum time to wait before regnerating a page given
+// a StatusChange message has arrived, but also the minimum time between
+// regenerations.
+//
+// `motusLatency` is the maximum time to wait before regenerating the motus
+// metadata, which gives receiver deployment name and project.
+func StatusPageMaintainer(path string, latency time.Duration) {
+	evt := Bus.Sub(MsgStatusChange)
+	go func() {
+		defer evt.Unsub("*")
+		var regen, latent bool
+		wait := time.NewTimer(latency)
+	MsgLoop:
+		for {
+			regen, latent = false, false
+			for ! (regen && latent) {
+				// wait for StatusChange messages and/or the latency timer
+				select {
+				case _, ok := <- evt.Msgs():
+					if ! ok {
+						break MsgLoop
+					}
+					regen = true
+				case _ = <-wait.C:
+					latent = true
+				}
+			}
+			MakeStatusPage()
+			wait.Reset(latency)
+		}
+		wait.Stop()
+	} ()
+ }
+
+func MakeStatusPage() {
+}
+
+func MotusMaintainer(latency time.Duration) {
+}
 
 func main() {
 	rand.Seed(time.Now().UnixNano())
@@ -805,18 +816,23 @@ func main() {
 	// even if the new goroutine has not run yet.
 
 	// record messages to a database
-	DBRecorder(ctx)
+	DBRecorder()
 
 	// maintain the list of active SGs
-	SGMinder(ctx)
+	SGMinder()
 
 	// manage sync jobs on attached SGs
-	SyncManager(ctx)
+	SyncManager()
 
-	// messageDump(ctx) // DEBUG
-	// watch for changes and regenerate the status page
-	// StatusPageGenerator(ctx, StatusPagePath)
+	// messageDump() // DEBUG
 
+	// maintain an up-to-date status page, but don't update more than
+	// once every 5 seconds and don't wait longer than that to update
+	// when needed.
+	StatusPageMaintainer(StatusPagePath, 5 * time.Second)
+
+	// maintain motus metadata
+	MotusMaintainer(10 * time.Minute)
 	//
 	//         Message Producers
 	//
