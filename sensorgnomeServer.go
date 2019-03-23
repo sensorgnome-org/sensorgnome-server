@@ -235,7 +235,7 @@ func DgramSource(ctx context.Context, address string, trusted bool) {
 	}
 }
 
-// Debug: A goroutine to dump Msgs
+// DEBUG: A goroutine to dump Msgs
 func messageDump(ctx context.Context) {
 	evt := Bus.Sub("*")
 	go func() {
@@ -297,51 +297,80 @@ func DBRecorder(ctx context.Context) {
 	}()
 }
 
-// get the latest sync time for a serial number
-// uses global `DB`; returns 0 if no sync has occurred
-func SGSyncTime(serno Serno) (lts time.Time) {
-	sqlStmt := fmt.Sprintf(`
-                   SELECT max(ts) FROM messages WHERE sender = '%s' and substr(message, 1, 1) == '2'`,
-		string(serno))
-	rows, err := DB.Query(sqlStmt)
-	defer rows.Close()
-	if err == nil {
-		if rows.Next() {
-			var ts float64
-			rows.Scan(&ts)
-			lts = time.Unix(0, int64(ts*1E9))
+// simple SQL query
+//
+// st is a prepared statement; pars are parameters to it, and res is
+// pointers to result values.  Attempts to run the statement with
+// the given parameters, and store the results from the first row
+// into the result values.
+//
+// if len(res) == 0, the statement is run using sql.Stmt.Exec,
+// otherwise, using sql.Stmt.Query
+//
+// returns true if no errors were encountered and (if len(res) != 0) at
+// least one row was returned
+
+func SQL(q dbQuery, pars []interface{}, res []interface{}) (rv bool) {
+	rv = false
+	if q >= DBQ_num_queries {
+		return false
+	}
+	st := dbQueries[q]
+	if len(res) > 0 {
+		rows, err := st.Query(pars...)
+		if err == nil {
+			if rows.Next() {
+				rows.Scan(res...)
+				rv = true
+			}
+			rows.Close()
+		}
+	} else {
+		_, err := st.Exec(pars)
+		if err == nil {
+			rv = true
 		}
 	}
 	return
 }
 
-// get the tunnel port for a serial number
-// uses global `DB`; returns 0 on error
-func TunnelPort(serno Serno) (t int) {
-	sqlStmt := fmt.Sprintf(`
-                   SELECT tunnelPort FROM receivers WHERE serno='%s'`,
-		string(serno))
-	rows, err := DB.Query(sqlStmt)
-	defer rows.Close()
-	if err == nil {
-		if rows.Next() {
-			rows.Scan(&t)
-		}
-	}
-	return
+// wrap an arbitrary set of interface{} objects into a slice
+//
+// 'c' for combine, as in R
+func c(v ...interface{}) []interface{} {
+	// trivial implementation, courtesy of `...` semantics
+	return v
 }
 
-// generate events for SG connection / disconnection
+// update an ActiveSG record from the global database DB
+//
+// return the object pointer to allow chaining
+// errors in getting records from the DB are ignored
+func (sg *ActiveSG) FromDB() *ActiveSG {
+	// get its tunnel port from the receivers table
+	var (
+		t  int
+		ts float64
+	)
+	if SQL(DBQGetTunnelPort, c(sg.Serno), c(&t)) &&
+		SQL(DBQGetTsLastSync, c(sg.Serno), c(&ts)) {
+		sg.lock.Lock()
+		defer sg.lock.Unlock()
+		sg.TunnelPort = t
+		sg.TsLastSync = time.Unix(0, int64(ts*1E9))
+	}
+	return sg
+}
+
+// generate messages for SG connection / disconnection events
 //
 // Watch directory `dir` for creation / deletion of files representing
 // connected SGs. Files representing SGs are those matching the first
 // capture group of `sgRE`.  After establishing a watch goroutine,
 // events are generated for any files already in `dir`, using the file
 // mtime.  This creates a race condition under which we might generate
-// two SGConnect events for the same SG, so subscribers need to account
+// two SGConnect events for the same SG; subscribers need to account
 // for this.
-//
-// SGEvents are passed to the global message bus Mbus under the topic "SGEvent"
 
 func ConnectionWatcher(ctx context.Context, dir string, sgRE string) {
 	re := regexp.MustCompile(sgRE)
@@ -364,7 +393,7 @@ func ConnectionWatcher(ctx context.Context, dir string, sgRE string) {
 				}
 				parts := re.FindStringSubmatch(event.Name)
 				if parts != nil {
-					msg := mbus.Msg{mbus.Topic(MsgSGConnect), SGMsg{sender: parts[1], ts: time.Now()}}
+					msg := mbus.Msg{MsgSGConnect, SGMsg{sender: parts[1], ts: time.Now()}}
 					if event.Op&fsnotify.Remove == fsnotify.Remove {
 						msg.Topic = mbus.Topic(MsgSGDisconnect)
 					}
@@ -387,7 +416,7 @@ func ConnectionWatcher(ctx context.Context, dir string, sgRE string) {
 		for _, finfo := range files {
 			parts := re.FindStringSubmatch(finfo.Name())
 			if parts != nil {
-				Bus.Pub(mbus.Msg{mbus.Topic(MsgSGConnect), SGMsg{sender: parts[1], ts: finfo.ModTime()}})
+				Bus.Pub(mbus.Msg{MsgSGConnect, SGMsg{sender: parts[1], ts: finfo.ModTime()}})
 			}
 		}
 	}
@@ -415,7 +444,11 @@ func SGMinder(ctx context.Context) {
 
 				if !ok {
 					// not in current list, so populate what is known from DB
-					sgp = &ActiveSG{Serno: serno, TsConn: m.ts, TsLastSync: SGSyncTime(serno), TunnelPort: TunnelPort(serno), Connected: true}
+					if t != MsgSGConnect {
+						panic("received non-connect message for not-yet-seen SG" + serno)
+					}
+					newsg := (&ActiveSG{Serno: serno, TsConn: m.ts, Connected: true}).FromDB()
+					sgp = newsg
 					activeSGs.Store(serno, sgp)
 				}
 				sg := sgp.(*ActiveSG)
@@ -459,7 +492,7 @@ SyncLoop:
 		// set up a wait uniformly distributed between lo and hi times
 		delay := time.Duration(SyncWaitLo+rand.Int31n(SyncWaitHi-SyncWaitLo)) * time.Minute
 		wait := time.NewTimer(delay)
-		Bus.Pub(mbus.Msg{mbus.Topic(MsgSGSyncPending), SGMsg{sender: string(serno), ts: time.Now().Add(delay)}})
+		Bus.Pub(mbus.Msg{MsgSGSyncPending, SGMsg{sender: string(serno), ts: time.Now().Add(delay)}})
 		select {
 		case synctime := <-wait.C:
 			// if receiver is not still connected, end this goroutine
@@ -479,7 +512,7 @@ SyncLoop:
 				cp, MotusUser, "touch", tf)
 			err = cmd.Run()
 			if err == nil {
-				Bus.Pub(mbus.Msg{mbus.Topic(MsgSGSync), SGMsg{ts: synctime, sender: string(serno)}})
+				Bus.Pub(mbus.Msg{MsgSGSync, SGMsg{ts: synctime, sender: string(serno)}})
 			} else {
 				fmt.Println(err.Error())
 			}
@@ -544,7 +577,28 @@ func SyncManager(ctx context.Context) {
 // global database pointer
 var DB *sql.DB
 
+// enum type for prepared queries
+type dbQuery int
+
+// query indexes by name
+const (
+	DBQGetTunnelPort dbQuery = iota // get tunnel port by serno from receivers
+	DBQGetTsLastSync                // get last sync time by serno from messages
+	DBQ_num_queries                 // marks number of queries
+)
+
+// text of the queries; order must match that of constants above
+var dbQueryText = [DBQ_num_queries]string{
+	"SELECT tunnelPort FROM receivers WHERE serno=?",
+	"SELECT max(ts) FROM messages WHERE sender = ? and substr(message, 1, 1) == '2'"}
+
+// global slice of prepared queries
+var dbQueries [DBQ_num_queries]*sql.Stmt
+
 // open/create the main database
+//
+// also prepares all parameterized queries
+
 func OpenDB(path string) (db *sql.DB) {
 	var err error
 	db, err = sql.Open("sqlite3", SGDBFile)
@@ -587,6 +641,14 @@ func OpenDB(path string) (db *sql.DB) {
 		if err != nil {
 			log.Printf("error: %s\n", s)
 			log.Fatal(err)
+		}
+	}
+
+	// prepare all statements we'll use
+	for i, q := range dbQueryText {
+		dbQueries[i], err = db.Prepare(q)
+		if err != nil {
+			panic("Unable to prepare query: " + q)
 		}
 	}
 	return
@@ -723,13 +785,36 @@ func main() {
 	Bus = mbus.NewMbus()
 	var ctx, _ = context.WithCancel(context.Background())
 	DB = OpenDB(SGDBFile)
+
+	//
+	//         Message Consumers
+	//
+	// Each consumer does two things:
+	//   - subscribe to messages; happens immediately in the main goroutine
+	//   - handle subscribed messages; happens in a new goroutine launched by the consumer
+	// So as soon as the consumer's main function returns, it is ready to
+	// receive messages on topics it has subscribed to. i.e. no messages will be missed,
+	// even if the new goroutine has not run yet.
+
+	// record messages to a database
 	DBRecorder(ctx)
+
+	// maintain the list of active SGs
 	SGMinder(ctx)
-	// messageDump(ctx)
+
+	// manage sync jobs on attached SGs
 	SyncManager(ctx)
-	// go StatusPageGenerator(ctx, StatusPagePath)
-	// launch goroutines which are message generators
-	// (subscribers are launched above)
+
+	// messageDump(ctx) // DEBUG
+	// watch for changes and regenerate the status page
+	// StatusPageGenerator(ctx, StatusPagePath)
+
+	//
+	//         Message Producers
+	//
+	// Producers are launched after consumers have subscribed
+	// to message topics.
+
 	ConnectionWatcher(ctx, ConnectionSemPath, ConnectionSemRE)
 	go StatusServer(ctx, "localhost:59055")
 	go TrustedStreamSource(ctx, "localhost:59054")
