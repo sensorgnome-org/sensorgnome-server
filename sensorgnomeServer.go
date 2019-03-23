@@ -60,6 +60,7 @@ const (
 	MsgSGConnect     = "1" // disconnected from ssh
 	MsgSGSync        = "2" // data sync with motus.org was launched
 	MsgSGSyncPending = "3" // data sync with motus.org has been scheduled for a future time
+	MsgSGActivate    = "4" // receiver has connected *and* had its info read from DB
 	MsgGPS           = "G" // from SG: GPS fix
 	MsgMachineInfo   = "M" // from SG: machine information
 	MsgTimeSync      = "C" // from SG: time sync
@@ -435,6 +436,11 @@ func SGMinder(ctx context.Context) {
 			select {
 			case msg, ok := <-evt.Msgs():
 				t, m := MsgTopic(msg.Topic), msg.Msg.(SGMsg)
+				if t == MsgSGActivate {
+					// ignore this message, as we are the one who
+					// generates it
+					continue MsgLoop
+				}
 				if !SernoRegexp.MatchString(m.sender) {
 					// not an SG message
 					continue MsgLoop
@@ -451,6 +457,7 @@ func SGMinder(ctx context.Context) {
 					sgp = newsg
 					activeSGs.Store(serno, sgp)
 				}
+				Bus.Pub(mbus.Msg{MsgSGActivate, SGMsg{sender: string(serno)}})
 				sg := sgp.(*ActiveSG)
 				sg.lock.Lock()
 				switch t {
@@ -528,15 +535,16 @@ SyncLoop:
 //
 // Subscribe to topic "SGEvent" on the global message bus.  Handle these like so:
 //
-// - `SGConnect`: start a SyncWorker (receiver-specific goroutine) that periodically starts a sync job to send new data
+// - `SGActivate`: start a SyncWorker (receiver-specific goroutine) that periodically starts a sync job to send new data
 // to sgdata.motus.org.   Multiple `SGConnect` events for the same receiver are collapsed into the
-// first one.
+// first one.  We need metadata for the receiver (e.g. tunnel port) which is why we subscribe to this message
+// instead of to `SGConnect`
 // - `SGDisconnect`: stop the asssociated SyncWorker
 //
 
 func SyncManager(ctx context.Context) {
 	syncCancels := make(map[Serno]context.CancelFunc)
-	evt := Bus.Sub(MsgSGConnect, MsgSGDisconnect)
+	evt := Bus.Sub(MsgSGActivate, MsgSGDisconnect)
 	go func() {
 	ConnLoop:
 		for {
@@ -547,7 +555,7 @@ func SyncManager(ctx context.Context) {
 					serno := Serno(m.sender)
 					_, have := syncCancels[serno]
 					switch e.Topic {
-					case MsgSGConnect:
+					case MsgSGActivate:
 						if have {
 							continue ConnLoop
 						}
