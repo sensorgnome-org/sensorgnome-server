@@ -1,7 +1,7 @@
 package main
 
 import (
-//	"bytes"
+	//	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -26,23 +26,23 @@ import (
 
 // customization constants
 const (
-	MotusUser            = "sg@sgdata.motus.org"                                                // user on sgdata.motus.org; this is who ssh makes us be
-	MotusUserKey         = "/home/sg_remote/.ssh/id_ed25519_sgorg_sgdata"                       // ssh key to use for sync on sgdata.motus.org
-	MotusControlPath     = "/home/sg_remote/sgdata.ssh"                                         // control path for multiplexing port mappings to sgdata.motus.org
-	MotusSyncTemplate    = "/sgm_local/sync/method=%d,serno=%s"                                 // template for file touched on sgdata.motus.org to cause sync; %d=port, %s=serno
-	MotusGetProjectsUrlT  = `https://motus.org/api/projects?json={"date":"%s"}`                                     // URL for motus info on projects
-	MotusGetReceiversUrlT = `https://motus.org/api/receivers/deployments?json={"date":"%s"}`                        // URL for motus info on receivers
-	MotusMinLatency      = 10                                                                  // minimum time (minutes) between queries to the motus metadata server
-	SernoRE              = "SG-[0-9A-Za-z]{12}"                                                 // regular expression matching SG serial number
-	SyncWaitLo           = 30                                                                   // minimum time between syncs of a receiver (minutes)
-	SyncWaitHi           = 90                                                                   // maximum time between syncs of a receiver (minutes)
-	SyncTimeDir          = "/home/sg_remote/last_sync"                                          // directory with one file per SG; mtime is last sync time
-	SGDBFile             = "/home/sg_remote/sg_remote.sqlite"                                   // sqlite database with receiver info
-	ConnectionSemPath    = "/dev/shm"                                                           // directory where sshd maintains semaphores indicating connected SGs
-	ConnectionSemRE      = "sem.(" + SernoRE + ")"                                              // regular expression for matching SG semaphores (capture group is serno)
-	StatusPagePath       = "/home/johnb/src/sensorgnome-server/website/content/status/index.md" // path to generated page (needs group write permission and ownership by sg_remote group)
-	ShortTimestampFormat = "Jan _2 15:04"                                                       // timestamp format for sync times etc. on status page
-	StatusPageMinLatency = 5                                                                    // minimum latency (seconds) between status page updates
+	MotusUser             = "sg@sgdata.motus.org"                                                       // user on sgdata.motus.org; this is who ssh makes us be
+	MotusUserKey          = "/home/sg_remote/.ssh/id_ed25519_sgorg_sgdata"                              // ssh key to use for sync on sgdata.motus.org
+	MotusControlPath      = "/home/sg_remote/sgdata.ssh"                                                // control path for multiplexing port mappings to sgdata.motus.org
+	MotusSyncTemplate     = "/sgm_local/sync/method=%d,serno=%s"                                        // template for file touched on sgdata.motus.org to cause sync; %d=port, %s=serno
+	MotusGetProjectsUrlT  = `https://motus.org/api/projects?json={"date":"%s"}`                         // URL for motus info on projects
+	MotusGetReceiversUrlT = `https://motus.org/api/receivers/deployments?json={"date":"%s","status":2}` // URL for motus info on receivers
+	MotusMinLatency       = 10                                                                          // minimum time (minutes) between queries to the motus metadata server
+	SernoRE               = "SG-[0-9A-Za-z]{12}"                                                        // regular expression matching SG serial number
+	SyncWaitLo            = 30                                                                          // minimum time between syncs of a receiver (minutes)
+	SyncWaitHi            = 90                                                                          // maximum time between syncs of a receiver (minutes)
+	SyncTimeDir           = "/home/sg_remote/last_sync"                                                 // directory with one file per SG; mtime is last sync time
+	SGDBFile              = "/home/sg_remote/sg_remote.sqlite"                                          // sqlite database with receiver info
+	ConnectionSemPath     = "/dev/shm"                                                                  // directory where sshd maintains semaphores indicating connected SGs
+	ConnectionSemRE       = "sem.(" + SernoRE + ")"                                                     // regular expression for matching SG semaphores (capture group is serno)
+	StatusPagePath        = "/home/johnb/src/sensorgnome-server/website/content/status/index.md"        // path to generated page (needs group write permission and ownership by sg_remote group)
+	ShortTimestampFormat  = "Jan _2 15:04"                                                              // timestamp format for sync times etc. on status page
+	StatusPageMinLatency  = 5                                                                           // minimum latency (seconds) between status page updates
 )
 
 // The type for messages.
@@ -529,7 +529,7 @@ func SyncManager() {
 	evt := Bus.Sub(MsgSGActivate, MsgSGDisconnect)
 	go func() {
 		defer evt.Unsub("*")
-		MsgLoop:
+	MsgLoop:
 		for e := range evt.Msgs() {
 			m := e.Msg.(SGMsg)
 			serno := Serno(m.sender)
@@ -777,11 +777,11 @@ func StatusPageMaintainer(path string, latency time.Duration) {
 	MsgLoop:
 		for {
 			regen, latent = false, false
-			for ! (regen && latent) {
+			for !(regen && latent) {
 				// wait for StatusChange messages and/or the latency timer
 				select {
-				case _, ok := <- evt.Msgs():
-					if ! ok {
+				case _, ok := <-evt.Msgs():
+					if !ok {
 						break MsgLoop
 					}
 					regen = true
@@ -793,42 +793,52 @@ func StatusPageMaintainer(path string, latency time.Duration) {
 			wait.Reset(latency)
 		}
 		wait.Stop()
-	} ()
- }
+	}()
+}
 
 func MakeStatusPage() {
 }
 
 type RecvDep struct {
 	ProjectID int
-	SiteName string
+	SiteName  string
 }
 
 type MotusCache struct {
-	lastFetch time.Time  // time motus data last fetched
-	Latency time.Duration
-	Projects map[int]string // project names by id
-	RecvDeps map[Serno]RecvDep // receiver deployments by Serno
+	lastFetch time.Time // time motus data last fetched
+	Latency   time.Duration
+	Projects  map[int]string    // project names by id
+	RecvDeps  map[Serno]RecvDep // receiver deployments by Serno
 }
 
 var MotusInfo *MotusCache
 
 type APIResProj struct {
 	Data []struct {
-		Id int
+		Id   int
 		Code string
+	}
+}
+
+type APIResRecv struct {
+	Data []struct {
+		ReceiverID     string
+		DeploymentName string
+		RecvProjectID  int
 	}
 }
 
 // maintain motus the metadata cache
 func UpdateMotusCache() {
 	if MotusInfo == nil {
-		MotusInfo = &MotusCache{Latency:MotusMinLatency * time.Minute, Projects:make(map[int]string), RecvDeps:make(map[Serno]RecvDep)}
+		MotusInfo = &MotusCache{Latency: MotusMinLatency * time.Minute, Projects: make(map[int]string), RecvDeps: make(map[Serno]RecvDep)}
 	}
 	now := time.Now()
 	if now.Sub(MotusInfo.lastFetch) > MotusInfo.Latency {
 		client := &http.Client{Timeout: 30 * time.Second}
-		res, err := client.Get(fmt.Sprintf(MotusGetProjectsUrlT, now.Format("20060102150405")))
+		nows := now.Format("20060102150405")
+		res, err := client.Get(fmt.Sprintf(MotusGetProjectsUrlT, nows))
+		got := 0
 		if err == nil {
 			var projs APIResProj
 			dec := json.NewDecoder(res.Body)
@@ -836,6 +846,20 @@ func UpdateMotusCache() {
 			for _, x := range projs.Data {
 				MotusInfo.Projects[x.Id] = x.Code
 			}
+			got++
+		}
+		res, err = client.Get(fmt.Sprintf(MotusGetReceiversUrlT, nows))
+		if err == nil {
+			var recvs APIResRecv
+			dec := json.NewDecoder(res.Body)
+			err = dec.Decode(&recvs)
+			for _, x := range recvs.Data {
+				MotusInfo.RecvDeps[Serno(x.ReceiverID)] = RecvDep{ProjectID: x.RecvProjectID, SiteName: x.DeploymentName}
+			}
+			got++
+		}
+		if got == 2 {
+			MotusInfo.lastFetch = now
 		}
 	}
 }
@@ -871,7 +895,7 @@ func main() {
 	// maintain an up-to-date status page, but don't update more than
 	// once every 5 seconds and don't wait longer than that to update
 	// when needed.
-	StatusPageMaintainer(StatusPagePath, StatusPageMinLatency * time.Second)
+	StatusPageMaintainer(StatusPagePath, StatusPageMinLatency*time.Second)
 
 	//
 	//         Message Producers
