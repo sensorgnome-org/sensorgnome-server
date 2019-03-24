@@ -15,11 +15,14 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"os"
 	//	"os"
 	"os/exec"
 	//	"path"
 	"regexp"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -89,6 +92,7 @@ var SernoRegexp = regexp.MustCompile(SernoRE)
 type ActiveSG struct {
 	Serno      Serno     // serial number; e.g. "SG-1234BBBK9812"
 	TsConn     time.Time // time at which connected
+	TsDisConn  time.Time // time at which last disconnected
 	TsLastSync time.Time // time at which last synced with motus
 	TsNextSync time.Time // time at which next to be synced with motus
 	TunnelPort int       // ssh tunnel port, if applicable
@@ -445,6 +449,7 @@ func SGMinder() {
 				sg.TsConn = m.ts
 				sg.Connected = true
 			case MsgSGDisconnect:
+				sg.TsDisConn = m.ts
 				sg.Connected = false
 			case MsgSGSync:
 				sg.TsLastSync = m.ts
@@ -789,14 +794,54 @@ func StatusPageMaintainer(path string, latency time.Duration) {
 					latent = true
 				}
 			}
-			MakeStatusPage()
+			UpdateMotusCache()
+			MakeStatusPage(path)
 			wait.Reset(latency)
 		}
 		wait.Stop()
 	}()
 }
 
-func MakeStatusPage() {
+func mkTime(t time.Time) string {
+	if t.IsZero() {
+		return "?"
+	}
+	return t.Format(ShortTimestampFormat)
+}
+
+func MakeStatusPage(path string) {
+	f, err := os.Create(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintln(f, "## Networked SensorGnomes ##")
+
+	fmt.Fprintln(f, mkTime(time.Now()))
+	fmt.Fprintln(f, "{{< bootstrap-table \"table table-striped table-bordered\" >}}")
+	fmt.Fprintln(f, "\nSerial Number (Port)|Site (Project)|Connected?|Last Conn/Disconn|motus.org Last Sync|motus.org Next Sync"+
+		"\n:------------------:|--------------|:--------:|-----------------|-------------------|-------------------")
+
+	var lines []string
+	activeSGs.Range(func(serno interface{}, sgp interface{}) bool {
+		sg := sgp.(*ActiveSG)
+		rdep := MotusInfo.RecvDeps[serno.(Serno)]
+		var status string
+		var tcon time.Time
+		if sg.Connected {
+			status = "Yes"
+			tcon = sg.TsConn
+		} else {
+			status = "No"
+			tcon = sg.TsDisConn
+		}
+		line := fmt.Sprintf(`%s (%d)|%s (%s)|%s|%s|<a href="https://sgdata.motus.org/status?jobsForSerno=%s&excludeSync=0" target="_blank">%s</a>|%s`, serno.(Serno), sg.TunnelPort, rdep.SiteName, MotusInfo.Projects[rdep.ProjectID], status, mkTime(tcon), serno.(Serno), mkTime(sg.TsLastSync), mkTime(sg.TsNextSync))
+		lines = append(lines, line)
+		return true
+	})
+	sort.Strings(lines)
+	fmt.Fprintln(f, strings.Join(lines, "\n"))
+	fmt.Fprintf(f, "{{< /bootstrap-table >}}\n")
 }
 
 type RecvDep struct {
@@ -828,7 +873,7 @@ type APIResRecv struct {
 	}
 }
 
-// maintain motus the metadata cache
+// maintain the motus metadata cache
 func UpdateMotusCache() {
 	if MotusInfo == nil {
 		MotusInfo = &MotusCache{Latency: MotusMinLatency * time.Minute, Projects: make(map[int]string), RecvDeps: make(map[Serno]RecvDep)}
@@ -891,7 +936,6 @@ func main() {
 
 	// messageDump() // DEBUG
 
-	UpdateMotusCache()
 	// maintain an up-to-date status page, but don't update more than
 	// once every 5 seconds and don't wait longer than that to update
 	// when needed.
