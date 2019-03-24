@@ -77,3 +77,7 @@ exit 0
 ### BBBK 2017-03-06 ###
 
 - same changes as above
+
+### Receivers completed ###
+- SG-1614BBBK1666
+- SG-1614BBBK1807
