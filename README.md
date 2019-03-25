@@ -11,15 +11,17 @@ This server manages a growing set of networked sensorgnome receivers.
 
 ## Functions ##
 - [register sensorgnomes](# register)
-- manage messages from SGs (i.e. store and/or forward)
-- provide SG status to clients
-- manage sync of SGs to motus.org (i.e. download and process raw data)
-- manage remote access to SGs (i.e. let users interact directly with an SG)
-- allow sensorgnomes from trusted IP addresses to self-register
-- allow sensorgnomes from untrusted IP addresses to self-register if they
+- manage messages from SGs:
+  - [x] store
+  - [ ] forward
+- [x] provide SG status to clients
+- [x] manage sync of SGs to motus.org (i.e. download and process raw data)
+- [ ] manage remote access to SGs (i.e. let users interact directly with an SG)
+- [ ] allow sensorgnomes from trusted IP addresses to self-register
+- [ ] allow sensorgnomes from untrusted IP addresses to self-register if they
   provide credentials; e.g. from motus.org and/or sensorgnome.org
-- allow remotely changing on-board tag database
-- allow remotely changing on-board deployment.txt configuration file
+- [ ] allow remotely changing on-board tag database
+- [ ] allow remotely changing on-board deployment.txt configuration file
 
 ### Message Channels ###
 
@@ -52,6 +54,23 @@ Messages arrive on these channels:
 
 Note that some BBKs are running a special release that allows them to send signed datagrams,
 but unfortunately we hardcoded the host address to 131.162.131.200 in uploader.js
+
+### Status Page ###
+- this server regenerates a simple markdown page whenever an event triggers it
+- the hugo server detects a change to the markdown file and regenerates static html
+- page is public and currently served from [new.sensorgnome.org](https://new.sensorgnome.org)
+
+### Status Server ###
+- this server listens on port 50025 for TCP connections, and replies to these commands:
+  - **who**:  list of `serno,port` for connected receivers
+  - **ports**: list of `port` of connected receivers
+  - **serno**: list of `serno` of connected receivers
+  - **status**: json-formated status of all *active* receivers, connected or not.  *active*
+  means connected at least once since the server was launched
+
+### Registration Server ###
+- login via ssh to port 59022 with the factory keys forces the command "nc localhost 59026",
+which communicates with this server's registration listener on port 59026
 
 ## Individual version changes ##
 
