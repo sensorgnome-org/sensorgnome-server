@@ -29,6 +29,10 @@ import (
 
 // customization constants
 const (
+	AddressUntrustedDgram = ":59022"                                                                    // UDP interface:port on which we receive signed messages from untrusted sources
+	AddressTrustedDgram   = ":59023"                                                                    // UDP interface:port on which we receive unsigned messages from trusted sources (e.g. localhost)
+	AddressTrustedStream  = "localhost:59024"                                                           // TCP interface:port on which we receive messages from trusted sources (e.g. SGs connected via ssh)
+	AddressStatusServer   = "localhost:59025"                                                           // TCP interface:port on which status requests are answered
 	MotusUser             = "sg@sgdata.motus.org"                                                       // user on sgdata.motus.org; this is who ssh makes us be
 	MotusUserKey          = "/home/sg_remote/.ssh/id_ed25519_sgorg_sgdata"                              // ssh key to use for sync on sgdata.motus.org
 	MotusControlPath      = "/home/sg_remote/sgdata.ssh"                                                // control path for multiplexing port mappings to sgdata.motus.org
@@ -948,10 +952,10 @@ func main() {
 	// to message topics.
 
 	ConnectionWatcher(ctx, ConnectionSemPath, ConnectionSemRE)
-	go StatusServer(ctx, "localhost:59025")
-	go TrustedStreamSource(ctx, "localhost:59024")
-	go DgramSource(ctx, ":59022", false)
-	go DgramSource(ctx, ":59023", true)
+	go StatusServer(ctx, AddressStatusServer)
+	go TrustedStreamSource(ctx, AddressTrustedStream)
+	go DgramSource(ctx, AddressUntrustedDgram, false)
+	go DgramSource(ctx, AddressTrustedDgram, true)
 
 	// wait until cancelled (nothing does this, though)
 	<-ctx.Done()
