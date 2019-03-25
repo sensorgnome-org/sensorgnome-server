@@ -948,10 +948,10 @@ func main() {
 	// to message topics.
 
 	ConnectionWatcher(ctx, ConnectionSemPath, ConnectionSemRE)
-	go StatusServer(ctx, "localhost:59055")
-	go TrustedStreamSource(ctx, "localhost:59054")
-	go DgramSource(ctx, ":59052", false)
-	go DgramSource(ctx, ":59053", true)
+	go StatusServer(ctx, "localhost:59025")
+	go TrustedStreamSource(ctx, "localhost:59024")
+	go DgramSource(ctx, ":59022", false)
+	go DgramSource(ctx, ":59023", true)
 
 	// wait until cancelled (nothing does this, though)
 	<-ctx.Done()
