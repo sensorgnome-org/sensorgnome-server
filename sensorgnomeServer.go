@@ -819,7 +819,7 @@ func MakeStatusPage(path string) {
 
 	fmt.Fprintln(f, mkTime(time.Now()))
 	fmt.Fprintln(f, "{{< bootstrap-table \"table table-striped table-bordered\" >}}")
-	fmt.Fprintln(f, "\nSerial Number (Port)|Site (Project)|Connected?|Last Conn/Disconn|motus.org Last Sync|motus.org Next Sync"+
+	fmt.Fprintln(f, "\nSerial Number (Port)|Site (Project)|Connected?|Last Con. / Discon.|motus.org Last Sync|motus.org Next Sync"+
 		"\n:------------------:|--------------|:--------:|-----------------|-------------------|-------------------")
 
 	var lines []string
