@@ -15,10 +15,11 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	//	"os"
 	"os/exec"
-	//	"path"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -29,28 +30,39 @@ import (
 
 // customization constants
 const (
-	AddressUntrustedDgram = ":59022"                                                                    // UDP interface:port on which we receive signed messages from untrusted sources
-	AddressTrustedDgram   = ":59023"                                                                    // UDP interface:port on which we receive unsigned messages from trusted sources (e.g. localhost)
-	AddressTrustedStream  = "localhost:59024"                                                           // TCP interface:port on which we receive messages from trusted sources (e.g. SGs connected via ssh)
-	AddressStatusServer   = "localhost:59025"                                                           // TCP interface:port on which status requests are answered
-	MotusUser             = "sg@sgdata.motus.org"                                                       // user on sgdata.motus.org; this is who ssh makes us be
-	MotusUserKey          = "/home/sg_remote/.ssh/id_ed25519_sgorg_sgdata"                              // ssh key to use for sync on sgdata.motus.org
-	MotusControlPath      = "/home/sg_remote/sgdata.ssh"                                                // control path for multiplexing port mappings to sgdata.motus.org
-	MotusSyncTemplate     = "/sgm_local/sync/method=%d,serno=%s"                                        // template for file touched on sgdata.motus.org to cause sync; %d=port, %s=serno
-	MotusGetProjectsUrlT  = `https://motus.org/api/projects?json={"date":"%s"}`                         // URL for motus info on projects
-	MotusGetReceiversUrlT = `https://motus.org/api/receivers/deployments?json={"date":"%s","status":2}` // URL for motus info on receivers
-	MotusMinLatency       = 10                                                                          // minimum time (minutes) between queries to the motus metadata server
-	SernoRE               = "SG-[0-9A-Za-z]{12}"                                                        // regular expression matching SG serial number
-	SyncWaitLo            = 30                                                                          // minimum time between syncs of a receiver (minutes)
-	SyncWaitHi            = 90                                                                          // maximum time between syncs of a receiver (minutes)
-	SyncTimeDir           = "/home/sg_remote/last_sync"                                                 // directory with one file per SG; mtime is last sync time
-	SGDBFile              = "/home/sg_remote/sg_remote.sqlite"                                          // sqlite database with receiver info
-	ConnectionSemPath     = "/dev/shm"                                                                  // directory where sshd maintains semaphores indicating connected SGs
-	ConnectionSemRE       = "sem.(" + SernoRE + ")"                                                     // regular expression for matching SG semaphores (capture group is serno)
-	StatusPagePath        = "/home/johnb/src/sensorgnome-server/website/content/status/index.md"        // path to generated page (needs group write permission and ownership by sg_remote group)
-	ShortTimestampFormat  = "Jan _2 15:04"                                                              // timestamp format for sync times etc. on status page
-	StatusPageMinLatency  = 5                                                                           // minimum latency (seconds) between status page updates
+	AddressRegServer      = "localhost:59026" // TCP interface: port on which registration exchanges happen
+	AddressStatusServer   = "localhost:59025" // TCP interface:port on which status requests are answered
+	AddressTrustedDgram   = ":59023"          // UDP interface:port on which we receive unsigned messages from trusted sources (e.g. localhost)
+	TrustedStreamPort     = 59024
+	AddressTrustedStream  = "localhost:" + string(TrustedStreamPort)                                           // TCP interface:port on which we receive messages from trusted sources (e.g. SGs connected via ssh)
+	AddressUntrustedDgram = ":59022"                                                                           // UDP interface:port on which we receive signed messages from untrusted sources
+	ConnectionSemPath     = "/dev/shm"                                                                         // directory where sshd maintains semaphores indicating connected SGs
+	ConnectionSemRE       = "sem.(" + SernoRE + ")"                                                            // regular expression for matching SG semaphores (capture group is serno)
+	CryptoAuthKeysPath    = CryptoKeyPath + "/authorized_keys"                                                 // sshd authorized_keys file for remote SGs
+	CryptoKeyPath         = "/home/sg_remote/.ssh"                                                             // where crypto keys for remote SGs are stored
+	MotusControlPath      = "/home/sg_remote/sgdata.ssh"                                                       // control path for multiplexing port mappings to sgdata.motus.org
+	MotusAuthUser         = `https://motus.org/api/user/validate?json={"date":"%s","login":"%s","pword":"%s"}` // URL to validate motus user and return authorizations
+	MotusGetProjectsUrlT  = `https://motus.org/api/projects?json={"date":"%s"}`                                // URL for motus info on projects
+	MotusGetReceiversUrlT = `https://motus.org/api/receivers/deployments?json={"date":"%s","status":2}`        // URL for motus info on receivers
+	MotusMinLatency       = 10                                                                                 // minimum time (minutes) between queries to the motus metadata server
+	MotusSyncTemplate     = "/sgm_local/sync/method=%d,serno=%s"                                               // template for file touched on sgdata.motus.org to cause sync; %d=port, %s=serno
+	MotusUserKey          = "/home/sg_remote/.ssh/id_ed25519_sgorg_sgdata"                                     // ssh key to use for sync on sgdata.motus.org
+	MotusUser             = "sg@sgdata.motus.org"                                                              // user on sgdata.motus.org; this is who ssh makes us be
+	SernoRE               = "SG-[0-9A-Za-z]{12}"                                                               // regular expression matching SG serial number
+	SGDBFile              = "/home/sg_remote/sg_remote.sqlite"                                                 // sqlite database with receiver info
+	ShortTimestampFormat  = "Jan _2 15:04"                                                                     // timestamp format for sync times etc. on status page
+	StatusPageMinLatency  = 5                                                                                  // minimum latency (seconds) between status page updates
+	StatusPagePath        = "/home/johnb/src/sensorgnome-server/website/content/status/index.md"               // path to generated page (needs group write permission and ownership by sg_remote group)
+	SyncTimeDir           = "/home/sg_remote/last_sync"                                                        // directory with one file per SG; mtime is last sync time
+	SyncWaitHi            = 90                                                                                 // maximum time between syncs of a receiver (minutes)
+	SyncWaitLo            = 30                                                                                 // minimum time between syncs of a receiver (minutes)
+	TrustedIPAddrRE       = `209\.183\.24\.36:[0-9]+`                                                          // hard-wired trusted network address for registration
+	TunnelPortMax         = 49999                                                                              // maximum SG tunnel port we assign
+	TunnelPortMin         = 40000                                                                              // minimum SG tunnel port we assign
 )
+
+// regular expression matching a trusted net.Addr.String()
+var TrustedIPAddrRegexp = regexp.MustCompile(TrustedIPAddrRE)
 
 // The type for messages.
 type SGMsg struct {
@@ -263,6 +275,10 @@ func messageDump() {
 	}()
 }
 
+func unixtime(ts time.Time) float64 {
+	return float64(ts.UnixNano()) / 1.0E9
+}
+
 // Goroutine that records (some) messages to a
 // table called "messages" in the global DB.
 func DBRecorder() {
@@ -290,7 +306,7 @@ func DBRecorder() {
 				text = string(msg.Topic)
 			}
 			// record timestamp in DB as double seconds;
-			_, err := stmt.Exec(float64(ts.UnixNano())/1.0E9, sender, text)
+			_, err := stmt.Exec(unixtime(ts), sender, text)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -302,14 +318,14 @@ func DBRecorder() {
 //
 // st is a prepared statement; pars are parameters to it, and res is
 // pointers to result values.  Attempts to run the statement with
-// the given parameters, and store the results from the first row
+// the given parameters, and store the results from the *first* row
 // into the result values.
 //
 // if len(res) == 0, the statement is run using sql.Stmt.Exec,
 // otherwise, using sql.Stmt.Query
 //
-// returns true if no errors were encountered and (if len(res) != 0) at
-// least one row was returned
+// returns true if len(res) == 0 and no errors were encountered,
+// or if len(res) != 0) and at least one row was returned
 
 func SQL(q dbQuery, pars []interface{}, res []interface{}) (rv bool) {
 	rv = false
@@ -575,15 +591,21 @@ type dbQuery int
 
 // query indexes by name
 const (
-	DBQGetTunnelPort dbQuery = iota // get tunnel port by serno from receivers
-	DBQGetTsLastSync                // get last sync time by serno from messages
-	DBQ_num_queries                 // marks number of queries
+	DBQGetTunnelPort   dbQuery = iota // get tunnel port by serno from receivers
+	DBQGetTsLastSync                  // get last sync time by serno from messages
+	DBQGetRegistration                // get registration by serno (tunnelPort, pubKey, privKey)
+	DBQNewSG                          // insert a record with tunnelPort for new serno
+	DBQNewSGKeys                      // update keys for an SG
+	DBQ_num_queries                   // marks number of queries
 )
 
 // text of the queries; order must match that of constants above
 var dbQueryText = [DBQ_num_queries]string{
 	"SELECT tunnelPort FROM receivers WHERE serno=?",
-	"SELECT max(ts) FROM messages WHERE sender = ? and substr(message, 1, 1) == '2'"}
+	"SELECT max(ts) FROM messages WHERE sender = ? AND SUBSTR(message, 1, 1) == '2'",
+	"SELECT tunnelPort, pubKey, privKey From receivers Where serno=?",
+	"INSERT INTO receivers (serno, tunnelport) SELECT serno, tunnelPort FROM (SELECT ? AS serno, MIN(t1.tunnelport)+1 AS tunnelPort FROM receivers AS t1 LEFT JOIN receivers AS t2 ON t1.tunnelport=t2.tunnelport-1 WHERE t2.tunnelport IS NULL) where tunnelPort between " + strconv.Itoa(TunnelPortMin) + " and " + strconv.Itoa(TunnelPortMax),
+	"update receivers set creationdate=?, pubkey=?, privkey=?, verified=? where serno=?"}
 
 // global slice of prepared queries
 var dbQueries [DBQ_num_queries]*sql.Stmt
@@ -742,7 +764,7 @@ ConnLoop:
 	conn.Close()
 }
 
-// listen for trusted streams and dispatch them to a handler
+// listen for status request connections and dispatch them to a handler
 func StatusServer(ctx context.Context, address string) {
 	addr, err := net.ResolveTCPAddr("tcp", address)
 	if err != nil {
@@ -763,6 +785,199 @@ func StatusServer(ctx context.Context, address string) {
 			return
 		}
 		go handleStatusConn(net.Conn(conn))
+	}
+	select {
+	case <-ctx.Done():
+	}
+}
+
+// check whether credentials authorize an operation on an SG
+func Auth(serno Serno, op string, creds string) bool {
+	parts := strings.Split(creds, ",")
+	if parts[0] == "motus" && len(parts) == 3 {
+		// credentials are for a motus user
+		// validate them
+		nows := time.Now().Format("20060102150405")
+		client := &http.Client{Timeout: 30 * time.Second}
+		res, err := client.Get(fmt.Sprintf(MotusAuthUser, nows, url.QueryEscape(parts[1]), url.QueryEscape(parts[2])))
+		var auth APIResAuth
+		dec := json.NewDecoder(res.Body)
+		err = dec.Decode(&auth)
+		if err != nil {
+			// user authentication failed
+			return false
+		}
+		// if SG is known at motus, user must belong to project under which it is deployed
+		// otherwise, user must simply be registered with motus
+		dep, known := MotusInfo.RecvDeps[serno]
+		if known {
+			_, inproj := auth.Projects[strconv.Itoa(dep.ProjectID)]
+			if !inproj {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// type representing an SG registration
+type Registration struct {
+	serno      Serno  // serial number
+	tunnelPort int    // designated ssh tunnel port
+	pubKey     string // public encryption key
+	privKey    string // private encryption key
+}
+
+// Handle registration requests.
+//
+// The request is a one line format:
+//
+//    SERNO: a bare SG serial number, e.g. SG-1234BBBK5678.
+// or
+//    SERNO,motus,USER,PASSWORD: a serial number followed by credential type (motus) and credentials
+//
+// On success, the reply is three lines:
+// ```
+// TUNNEL_PORT
+// PUB_KEY
+// PRIV_KEY
+// ```
+// where:
+//
+// - `TUNNEL_PORT` is the integer port number the SG is allowed to map from the server to
+//     its own sshd port
+// - `PUB_KEY`, `PRIV_KEY` is the cryptographic key pair the SG can use to connect to the server to send data and to map the tunnel port
+//
+// For unsuccessful requests, we close the connection without replying.
+//
+// The request succeeds only in these cases:
+//
+//  - `SERNO` not seen before (tunnelPort, pubKey, privKey are then generated from scratch)
+//  - `SERNO` seen before; connection from trusted IP address
+//  - `SERNO` seen before; connection from untrusted IP address; valid credentials given
+//
+func handleRegConn(conn net.Conn) {
+	buff := make([]byte, 4096)
+	var lr = NewLineReader(conn, &buff)
+	err := lr.getLine()
+	{
+		if err != nil {
+			goto Done
+		}
+		serno := buff[0:12]
+		if !SernoRegexp.Match(serno) {
+			// invalid serno
+			goto Done
+		}
+		// is this connection from a trusted IP address?
+		trusted := TrustedIPAddrRegexp.MatchString(conn.RemoteAddr().String())
+		// has this SG been seen before?
+		var reg Registration
+		known := SQL(DBQGetRegistration, c(serno), c(&reg.tunnelPort, &reg.pubKey, &reg.privKey))
+		if !known && RegisterSG(Serno(serno), &reg) != nil {
+			goto Done
+		}
+		// see whether we need to authenticated request
+		if known && !trusted && !Auth(Serno(serno), "register", string(buff[13:])) {
+			goto Done
+		}
+		_, err = io.WriteString(conn, fmt.Sprintf("%d\n%s%s", reg.tunnelPort, reg.pubKey, reg.privKey))
+	}
+Done:
+	conn.Close()
+}
+
+// create a new registration for an SG server into the existing struct
+//
+// return Error on failure, nil on success
+func RegisterSG(serno Serno, reg *Registration) error {
+	ok := SQL(DBQNewSG, c(serno), c())
+	if !ok {
+		// unable to create new SG record (!) out of tunnel ports?  Obvious DOS attack vector here!
+		return fmt.Errorf("unable to register new SG: %s", serno)
+	}
+	reg = &Registration{serno: serno}
+	// read back the tunnelPort just generated
+	if !SQL(DBQGetRegistration, c(serno), c(&reg.tunnelPort, &reg.pubKey, &reg.privKey)) {
+		return fmt.Errorf("unable to read registration record for %s", serno)
+	}
+
+	// FIXME: deal with keys having already been generated on sgdata.motus.org
+	// because data files were seen before the receiver was.
+
+	// alt_keyfile_name = ALT_KEYPATH + "id_dsa_sg_" + serno
+
+	// if os.path.exists(alt_keyfile_name):
+	//     # move the existing keys to the new location
+	//     os.rename(alt_keyfile_name, keyfile_name)
+	//     os.rename(alt_keyfile_name + ".pub", keyfile_name + ".pub")
+	// else:
+	// 	# generate a pub/priv keypair
+	keyfile := path.Join(CryptoKeyPath, "id_rsa_"+string(serno))
+	err := exec.Command("ssh-keygen", "-t", "rsa", "-f", keyfile, "-N", "").Run()
+	if err != nil {
+		return err
+	}
+	// export an openssl-compatible version of the public key
+	// for use in signature verification
+	// sample command: openssl dsa -in ~sg_remote/.ssh/id_dsa_sg_2814BBBK4765 -pubout -out ~sg_remote/.ssh/id_dsa_sg_2814BBBK4765.openssl.pub
+	err = exec.Command("openssl", "rsa", "-in", keyfile, "-pubout", "-out", keyfile+".openssl.pub").Run()
+	if err != nil {
+		return err
+	}
+	privkey, err := ioutil.ReadFile(keyfile)
+	if err != nil {
+		return err
+	}
+	pubkey, err := ioutil.ReadFile(keyfile + ".pub")
+	if err != nil {
+		return err
+	}
+
+	if !SQL(DBQNewSGKeys, c(unixtime(time.Now()), pubkey, privkey, true, string(serno)), c()) {
+		return fmt.Errorf("Unable to record crypto keys for %s", serno)
+	}
+
+	//     auth_key_file = open(SSH_DIR + "authorized_keys", "a")
+	//     # restrict this key to running sg_remote and only mapping a single remote port
+	//     # local port mapping is restricted to reach port 7 on the host, which if it
+	//     # is even available is the echo port.  This means even if someone gets
+	//     # hold of a unique pub/priv key pair for a sensorgnome, at most they can
+	//     # fill up an sqlite database with junk, and can't connect to any services
+	//     # on the host.
+
+	f, err := os.OpenFile(CryptoAuthKeysPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(f, `command="/bin/false",no-pty,no-X11-forwarding,single-remote-forwarding-port=%d,permitopen="localhost:%d",permitopen="localhost:7",environment="SG_SERNO=%s",environment="SG_PORT=%d",connection-semname="%s" %s`,
+		reg.tunnelPort, TrustedStreamPort, string(serno), reg.tunnelPort, string(serno), pubkey)
+	f.Close()
+	return err
+}
+
+// listen for SG registration request connections and dispatch them to a handler
+func RegistrationServer(ctx context.Context, address string) {
+	addr, err := net.ResolveTCPAddr("tcp", address)
+	if err != nil {
+		print("failed to resolve address " + address)
+		return
+	}
+	srv, err := net.ListenTCP("tcp", addr)
+	if err != nil {
+		print("failed to listen on " + address)
+		return
+	}
+	defer srv.Close()
+	for {
+		conn, err := srv.AcceptTCP()
+		if err != nil {
+			// handle error
+			print("problem accepting connection")
+			return
+		}
+		go handleRegConn(net.Conn(conn))
 	}
 	select {
 	case <-ctx.Done():
@@ -877,6 +1092,12 @@ type APIResRecv struct {
 	}
 }
 
+type APIResAuth struct {
+	UserID       int
+	EmailAddress string
+	Projects     map[string]string
+}
+
 // maintain the motus metadata cache
 func UpdateMotusCache() {
 	if MotusInfo == nil {
@@ -956,7 +1177,7 @@ func main() {
 	go TrustedStreamSource(ctx, AddressTrustedStream)
 	go DgramSource(ctx, AddressUntrustedDgram, false)
 	go DgramSource(ctx, AddressTrustedDgram, true)
-
+	go RegistrationServer(ctx, AddressRegServer)
 	// wait until cancelled (nothing does this, though)
 	<-ctx.Done()
 }
