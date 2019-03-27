@@ -34,14 +34,8 @@ const (
 	AddressStatusServer   = "localhost:59025" // TCP interface:port on which status requests are answered
 	AddressTrustedDgram   = ":59023"          // UDP interface:port on which we receive unsigned messages from trusted sources (e.g. localhost)
 	TrustedStreamPort     = "59024"
-	AddressTrustedStream  = "localhost:" + TrustedStreamPort // TCP interface:port on which we receive messages from trusted sources (e.g. SGs connected via ssh)
-	AddressUntrustedDgram = ":59022"                         // UDP interface:port on which we receive messages from untrusted sources
-	// AddressRegServer      = "localhost:59036" // TCP interface: port on which registration exchanges happen
-	// AddressStatusServer   = "localhost:59035" // TCP interface:port on which status requests are answered
-	// AddressTrustedDgram   = ":59033"          // UDP interface:port on which we receive unsigned messages from trusted sources (e.g. localhost)
-	// TrustedStreamPort     = "59034"
-	// AddressTrustedStream  = "localhost:" + TrustedStreamPort                                           // TCP interface:port on which we receive messages from trusted sources (e.g. SGs connected via ssh)
-	// AddressUntrustedDgram = ":59032"                                                                           // UDP interface:port on which we receive signed messages from untrusted sources
+	AddressTrustedStream  = "localhost:" + TrustedStreamPort                                                   // TCP interface:port on which we receive messages from trusted sources (e.g. SGs connected via ssh)
+	AddressUntrustedDgram = ":59022"                                                                           // UDP interface:port on which we receive messages from untrusted sources
 	ConnectionSemPath     = "/dev/shm"                                                                         // directory where sshd maintains semaphores indicating connected SGs
 	ConnectionSemRE       = "sem.(" + SernoRE + ")"                                                            // regular expression for matching SG semaphores (capture group is serno)
 	CryptoAuthKeysPath    = CryptoKeyPath + "/authorized_keys"                                                 // sshd authorized_keys file for remote SGs
