@@ -877,11 +877,15 @@ func handleRegConn(conn net.Conn) {
 		// has this SG been seen before?
 		var reg Registration
 		known := SQL(DBQGetRegistration, c(string(serno)), c(&reg.tunnelPort, &reg.pubKey, &reg.privKey))
-		if !known && RegisterSG(Serno(serno), &reg) != nil {
-			goto Done
+		if !known {
+			if err = RegisterSG(Serno(serno), &reg); err != nil {
+				log.Printf("Unable to register new receiver %s: %s", string(serno), err.Error())
+				goto Done
+			}
 		}
 		// see whether we need to authenticated request
-		if known && !trusted && !Auth(Serno(serno), "register", string(buff[16:])) {
+		if known && !trusted && (len(buff) <= 16 || !Auth(Serno(serno), "register", string(buff[16:]))) {
+			log.Printf("Attempt to register failed at auth: %s\n", buff)
 			goto Done
 		}
 		_, err = io.WriteString(conn, fmt.Sprintf("%d\n%s%s", reg.tunnelPort, reg.pubKey, reg.privKey))
@@ -890,16 +894,16 @@ Done:
 	conn.Close()
 }
 
-// create a new registration for an SG server into the existing struct
+// create a new registration for an SG into the existing struct
 //
 // return Error on failure, nil on success
 func RegisterSG(serno Serno, reg *Registration) error {
-	ok := SQL(DBQNewSG, c(serno), c())
+	ok := SQL(DBQNewSG, c(string(serno)), c())
 	if !ok {
 		// unable to create new SG record (!) out of tunnel ports?  Obvious DOS attack vector here!
 		return fmt.Errorf("unable to register new SG: %s", serno)
 	}
-	reg = &Registration{serno: serno}
+	reg.serno = serno
 	// read back the tunnelPort just generated
 	if !SQL(DBQGetRegistration, c(serno), c(&reg.tunnelPort, &reg.pubKey, &reg.privKey)) {
 		return fmt.Errorf("unable to read registration record for %s", serno)
