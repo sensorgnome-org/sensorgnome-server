@@ -33,9 +33,15 @@ const (
 	AddressRegServer      = "localhost:59026" // TCP interface: port on which registration exchanges happen
 	AddressStatusServer   = "localhost:59025" // TCP interface:port on which status requests are answered
 	AddressTrustedDgram   = ":59023"          // UDP interface:port on which we receive unsigned messages from trusted sources (e.g. localhost)
-	TrustedStreamPort     = 59024
-	AddressTrustedStream  = "localhost:" + string(TrustedStreamPort)                                           // TCP interface:port on which we receive messages from trusted sources (e.g. SGs connected via ssh)
-	AddressUntrustedDgram = ":59022"                                                                           // UDP interface:port on which we receive signed messages from untrusted sources
+	TrustedStreamPort     = "59024"
+	AddressTrustedStream  = "localhost:" + TrustedStreamPort // TCP interface:port on which we receive messages from trusted sources (e.g. SGs connected via ssh)
+	AddressUntrustedDgram = ":59022"                         // UDP interface:port on which we receive messages from untrusted sources
+	// AddressRegServer      = "localhost:59036" // TCP interface: port on which registration exchanges happen
+	// AddressStatusServer   = "localhost:59035" // TCP interface:port on which status requests are answered
+	// AddressTrustedDgram   = ":59033"          // UDP interface:port on which we receive unsigned messages from trusted sources (e.g. localhost)
+	// TrustedStreamPort     = "59034"
+	// AddressTrustedStream  = "localhost:" + TrustedStreamPort                                           // TCP interface:port on which we receive messages from trusted sources (e.g. SGs connected via ssh)
+	// AddressUntrustedDgram = ":59032"                                                                           // UDP interface:port on which we receive signed messages from untrusted sources
 	ConnectionSemPath     = "/dev/shm"                                                                         // directory where sshd maintains semaphores indicating connected SGs
 	ConnectionSemRE       = "sem.(" + SernoRE + ")"                                                            // regular expression for matching SG semaphores (capture group is serno)
 	CryptoAuthKeysPath    = CryptoKeyPath + "/authorized_keys"                                                 // sshd authorized_keys file for remote SGs
@@ -865,7 +871,7 @@ func handleRegConn(conn net.Conn) {
 		if err != nil {
 			goto Done
 		}
-		serno := buff[0:12]
+		serno := buff[0:15]
 		if !SernoRegexp.Match(serno) {
 			// invalid serno
 			goto Done
@@ -874,12 +880,12 @@ func handleRegConn(conn net.Conn) {
 		trusted := TrustedIPAddrRegexp.MatchString(conn.RemoteAddr().String())
 		// has this SG been seen before?
 		var reg Registration
-		known := SQL(DBQGetRegistration, c(serno), c(&reg.tunnelPort, &reg.pubKey, &reg.privKey))
+		known := SQL(DBQGetRegistration, c(string(serno)), c(&reg.tunnelPort, &reg.pubKey, &reg.privKey))
 		if !known && RegisterSG(Serno(serno), &reg) != nil {
 			goto Done
 		}
 		// see whether we need to authenticated request
-		if known && !trusted && !Auth(Serno(serno), "register", string(buff[13:])) {
+		if known && !trusted && !Auth(Serno(serno), "register", string(buff[16:])) {
 			goto Done
 		}
 		_, err = io.WriteString(conn, fmt.Sprintf("%d\n%s%s", reg.tunnelPort, reg.pubKey, reg.privKey))
@@ -951,7 +957,7 @@ func RegisterSG(serno Serno, reg *Registration) error {
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(f, `command="/bin/false",no-pty,no-X11-forwarding,single-remote-forwarding-port=%d,permitopen="localhost:%d",permitopen="localhost:7",environment="SG_SERNO=%s",environment="SG_PORT=%d",connection-semname="%s" %s`,
+	_, err = fmt.Fprintf(f, `command="/bin/false",no-pty,no-X11-forwarding,single-remote-forwarding-port=%d,permitopen="localhost:%s",permitopen="localhost:7",environment="SG_SERNO=%s",environment="SG_PORT=%d",connection-semname="%s" %s`,
 		reg.tunnelPort, TrustedStreamPort, string(serno), reg.tunnelPort, string(serno), pubkey)
 	f.Close()
 	return err
