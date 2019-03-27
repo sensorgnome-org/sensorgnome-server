@@ -805,7 +805,7 @@ func Auth(serno Serno, op string, creds string) bool {
 		var auth APIResAuth
 		dec := json.NewDecoder(res.Body)
 		err = dec.Decode(&auth)
-		if err != nil {
+		if err != nil || auth.ErrorCode != "" {
 			// user authentication failed
 			return false
 		}
