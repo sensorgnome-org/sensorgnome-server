@@ -599,13 +599,15 @@ const (
 	DBQ_num_queries                   // marks number of queries
 )
 
-// text of the queries; order must match that of constants above
+// text of the queries; we use constants from above to make sure
+// queries are in correct slots of the array
+
 var dbQueryText = [DBQ_num_queries]string{
-	"SELECT tunnelPort FROM receivers WHERE serno=?",
-	"SELECT max(ts) FROM messages WHERE sender = ? AND SUBSTR(message, 1, 1) == '2'",
-	"SELECT tunnelPort, pubKey, privKey From receivers Where serno=?",
-	"INSERT INTO receivers (serno, tunnelport) SELECT serno, tunnelPort FROM (SELECT ? AS serno, MIN(t1.tunnelport)+1 AS tunnelPort FROM receivers AS t1 LEFT JOIN receivers AS t2 ON t1.tunnelport=t2.tunnelport-1 WHERE t2.tunnelport IS NULL) where tunnelPort between " + strconv.Itoa(TunnelPortMin) + " and " + strconv.Itoa(TunnelPortMax),
-	"update receivers set creationdate=?, pubkey=?, privkey=?, verified=? where serno=?"}
+	DBQGetTunnelPort:   "SELECT tunnelPort FROM receivers WHERE serno=?",
+	DBQGetTsLastSync:   "SELECT max(ts) FROM messages WHERE sender = ? AND SUBSTR(message, 1, 1) == '2'",
+	DBQGetRegistration: "SELECT tunnelPort, pubKey, privKey From receivers Where serno=?",
+	DBQNewSG:           "INSERT INTO receivers (serno, tunnelport) SELECT serno, tunnelPort FROM (SELECT ? AS serno, MIN(t1.tunnelport)+1 AS tunnelPort FROM receivers AS t1 LEFT JOIN receivers AS t2 ON t1.tunnelport=t2.tunnelport-1 WHERE t2.tunnelport IS NULL) where tunnelPort between " + strconv.Itoa(TunnelPortMin) + " and " + strconv.Itoa(TunnelPortMax),
+	DBQNewSGKeys:       "update receivers set creationdate=?, pubkey=?, privkey=?, verified=? where serno=?"}
 
 // global slice of prepared queries
 var dbQueries [DBQ_num_queries]*sql.Stmt
