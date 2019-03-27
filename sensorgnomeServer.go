@@ -1104,6 +1104,7 @@ type APIResAuth struct {
 	UserID       int
 	EmailAddress string
 	Projects     map[string]string
+	ErrorCode    string // returned when login fails
 }
 
 // maintain the motus metadata cache
