@@ -860,7 +860,7 @@ type Registration struct {
 //  - `SERNO` seen before; connection from untrusted IP address; valid credentials given
 //
 func handleRegConn(conn net.Conn) {
-	buff := make([]byte, 4096)
+	buff := make([]byte, 256)
 	var lr = NewLineReader(conn, &buff)
 	err := lr.getLine()
 	{
