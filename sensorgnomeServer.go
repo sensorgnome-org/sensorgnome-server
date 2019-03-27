@@ -205,7 +205,7 @@ func TrustedStreamSource(ctx context.Context, address string) {
 	}
 	srv, err := net.ListenTCP("tcp", addr)
 	if err != nil {
-		print("failed to listen on " + address)
+		print("failed to listen on " + address + ":" + err.Error())
 		return
 	}
 	defer srv.Close()
