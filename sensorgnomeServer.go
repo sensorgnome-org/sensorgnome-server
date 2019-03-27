@@ -349,7 +349,7 @@ func SQL(q dbQuery, pars []interface{}, res []interface{}) (rv bool) {
 			rows.Close()
 		}
 	} else {
-		_, err := st.Exec(pars)
+		_, err := st.Exec(pars...)
 		if err == nil {
 			rv = true
 		}
