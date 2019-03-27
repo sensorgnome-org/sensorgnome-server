@@ -944,6 +944,8 @@ func RegisterSG(serno Serno, reg *Registration) error {
 	if !SQL(DBQNewSGKeys, c(unixtime(time.Now()), pubkey, privkey, true, string(serno)), c()) {
 		return fmt.Errorf("Unable to record crypto keys for %s", serno)
 	}
+	reg.pubKey = string(pubkey)
+	reg.privKey = string(privkey)
 
 	//     auth_key_file = open(SSH_DIR + "authorized_keys", "a")
 	//     # restrict this key to running sg_remote and only mapping a single remote port
