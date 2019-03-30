@@ -52,9 +52,10 @@ const (
 	MotusSSHUserKey       = "/home/sg_remote/.ssh/id_ed25519_sgorg_sgdata"                                     // ssh key to use for sync on sgdata.motus.org
 	MotusSSHUser          = "sg@sgdata.motus.org"                                                              // user on sgdata.motus.org; this is who ssh makes us be
 	SernoRE               = "SG-[0-9A-Za-z]{12}"                                                               // regular expression matching SG serial number
+	SessTokenKeepAlive    = time.Minute * 2                                                                    // how long before an unused direct connection to an SG can be bumped by another user
 	SGDBFile              = "/home/sg_remote/sg_remote.sqlite"                                                 // sqlite database with receiver info
-	SGUser                = "bone" // username for logging into remote SG; trivial, but remote SG only allows login via ssh from its local domain
-	SGPassword            = "bone" // password for logging into remote SG
+	SGUser                = "bone"                                                                             // username for logging into remote SG; trivial, but remote SG only allows login via ssh from its local domain
+	SGPassword            = "bone"                                                                             // password for logging into remote SG
 	ShortTimestampFormat  = "Jan _2 15:04"                                                                     // timestamp format for sync times etc. on status page
 	StatusPageMinLatency  = 5                                                                                  // minimum latency (seconds) between status page updates
 	StatusPagePath        = "/home/johnb/src/sensorgnome-server/website/content/status/index.md"               // path to generated page (needs group write permission and ownership by sg_remote group)
@@ -111,16 +112,16 @@ var SernoRegexp = regexp.MustCompile(SernoRE)
 
 // an SG we have seen recently
 type ActiveSG struct {
-	Serno      Serno     // serial number; e.g. "SG-1234BBBK9812"
-	TsConn     time.Time // time at which connected
-	TsDisConn  time.Time // time at which last disconnected
-	TsLastSync time.Time // time at which last synced with motus
-	TsNextSync time.Time // time at which next to be synced with motus
-	TunnelPort int       // ssh tunnel port, if applicable
-	WebPort    int       // if non-zero, the local port mapped via ssh tunnel to the SG's port 80
-	WebUser    int       // if non-zero, ID of the user directly connected to the SG's port 80
+	Serno      Serno                  // serial number; e.g. "SG-1234BBBK9812"
+	TsConn     time.Time              // time at which connected
+	TsDisConn  time.Time              // time at which last disconnected
+	TsLastSync time.Time              // time at which last synced with motus
+	TsNextSync time.Time              // time at which next to be synced with motus
+	TunnelPort int                    // ssh tunnel port, if applicable
+	WebPort    int                    // if non-zero, the local port mapped via ssh tunnel to the SG's port 80
+	WebUser    int                    // if non-zero, ID of the user directly connected to the SG's port 80
 	WebRProxy  *httputil.ReverseProxy // reverse proxy to remote SG's web server
-	Connected  bool      // actually connected?  once we've seen a receiver, we keep this struct in memory,
+	Connected  bool                   // actually connected?  once we've seen a receiver, we keep this struct in memory,
 	// but set this field to false when it disconnects
 	lock sync.Mutex // lock for any read or write access to fields in this struct
 }
@@ -1262,14 +1263,18 @@ var loginTemplate *template.Template = template.Must(template.New("LoginRedirect
 // token for an authenticated session; relates one logged in user to one active SG
 // via a tunnel connection through ssh
 type SessToken struct {
-	Token  string       // crypt token stored in cookie as persistent auth
-	Expiry time.Time    // when token expires
-	UserID int          // user of this session
-	SG *ActiveSG // SG of this session
+	Token   string    // crypt token stored in cookie as persistent auth
+	Expiry  time.Time // when token expires
+	LastReq time.Time // time of last request from client
+	UserID  int       // user of this session
+	SG      *ActiveSG // SG of this session
 }
 
 // map from token string to session token
 var StringToToken map[string]*SessToken
+
+// map from Serno to session token
+var SernoToToken map[Serno]*SessToken
 
 /*
    handle requests as per: https://github.com/jbrzusto/sensorgnomeServer/issues/5#issuecomment-477696911
@@ -1332,9 +1337,9 @@ func DirectServer(w http.ResponseWriter, r *http.Request) {
 			if user != nil {
 				// user is authorized for this SG, so generate a token,
 				// see whether the SG is still connected
-				sgp, ok := activeSGs.Load(serno);
+				sgp, ok := activeSGs.Load(serno)
 				sg := sgp.(*ActiveSG)
-				if !ok || ! sg.Connected {
+				if !ok || !sg.Connected {
 					// validated request, so forward to SG
 					http.Error(w, "This SG is not connected.", http.StatusNotFound)
 					return
@@ -1345,20 +1350,18 @@ func DirectServer(w http.ResponseWriter, r *http.Request) {
 				if sg.WebPort == 0 {
 					webport := sg.TunnelPort + 10000
 					cmd := exec.Command("sshpass", "-p", SGPassword, "ssh", "-p", strconv.Itoa(sg.TunnelPort), "-f", "-N",
-						"-oStrictHostKeyChecking=no", "-oExitOnForwardFailure=yes", fmt.Sprintf("-L%d:localhost:80", webport), SGUser + "@localhost")
+						"-oStrictHostKeyChecking=no", "-oExitOnForwardFailure=yes", fmt.Sprintf("-L%d:localhost:80", webport), SGUser+"@localhost")
 					if err := cmd.Run(); err != nil {
 						sg.WebPort = 0
-						sg.WebUser = 0
 						sg.WebRProxy = nil
 						http.Error(w, "Unable to connect to this SG.", http.StatusNotFound)
 						return
 					}
 					sg.WebPort = webport
-					sg.WebUser = user.UserID
 					// set up a reverse proxy to the SG's web server
 					sgurl, _ := url.Parse("http://localhost:" + strconv.Itoa(webport))
 					sg.WebRProxy = &httputil.ReverseProxy{
-						Director: func (req *http.Request) {
+						Director: func(req *http.Request) {
 							req.URL.Scheme = sgurl.Scheme
 							req.URL.Host = sgurl.Host
 							if len(req.URL.Path) >= 16 && req.URL.Path[1:16] == string(sg.Serno) {
@@ -1366,17 +1369,29 @@ func DirectServer(w http.ResponseWriter, r *http.Request) {
 							}
 						},
 					}
-				} else if sg.WebUser != user.UserID {
-					http.Error(w, "This SG is in use by " + MotusInfo.Users[sg.WebUser].Email +" - try again later", http.StatusServiceUnavailable)
-					return
+				} else if sg.WebUser != 0 && sg.WebUser != user.UserID {
+					// see if the existing session for this SG has expired
+					oldtoken := SernoToToken[serno]
+					now := time.Now()
+					if oldtoken.Expiry.Before(now) || now.Sub(oldtoken.LastReq) > SessTokenKeepAlive {
+						// delete the previous token
+						delete(SernoToToken, serno)
+						delete(StringToToken, oldtoken.Token)
+						sg.WebUser = 0
+					} else {
+						http.Error(w, "This SG is in use by "+MotusInfo.Users[sg.WebUser].Email+" - try again later", http.StatusServiceUnavailable)
+						return
+					}
 				}
 
 				// set up a session token representing the connection to this SG
 				token := SessToken{Token: MakeToken(32),
 					Expiry: time.Now().Add(time.Minute * 30),
 					UserID: user.UserID,
-					SG: sg}
+					SG:     sg}
 				StringToToken[token.Token] = &token
+				SernoToToken[serno] = &token
+				sg.WebUser = user.UserID
 				// add cookie and redirect to the original path
 				// which is stored in the form's "data" item
 				// This cookie grants the web client access to the session with this SG
@@ -1404,6 +1419,7 @@ func DirectServer(w http.ResponseWriter, r *http.Request) {
 		return
 	} else {
 		// validated request, so forward to SG
+		token.LastReq = time.Now()
 		token.SG.WebRProxy.ServeHTTP(w, r)
 	}
 	// for errors: http.Error(w, "404 page not found", http.StatusNotFound)
@@ -1411,6 +1427,7 @@ func DirectServer(w http.ResponseWriter, r *http.Request) {
 
 func StartDirectServer(ctx context.Context, addr string) {
 	StringToToken = make(map[string]*SessToken)
+	SernoToToken = make(map[Serno]*SessToken)
 	srv := http.Server{Addr: addr, Handler: http.HandlerFunc(DirectServer)}
 	srv.ListenAndServe()
 	defer srv.Shutdown(nil)
