@@ -9,12 +9,14 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/jbrzusto/mbus"
 	_ "github.com/mattn/go-sqlite3"
+	"html/template"
 	"io"
 	"io/ioutil"
 	"log"
 	"math/rand"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	//	"os"
@@ -36,6 +38,7 @@ const (
 	TrustedStreamPort     = "59024"
 	AddressTrustedStream  = "localhost:" + TrustedStreamPort                                                   // TCP interface:port on which we receive messages from trusted sources (e.g. SGs connected via ssh)
 	AddressUntrustedDgram = ":59022"                                                                           // UDP interface:port on which we receive messages from untrusted sources
+	AddressDirectServer   = "localhost:59027"                                                                  // TCP interface:port for direct connections to SG web servers
 	ConnectionSemPath     = "/dev/shm"                                                                         // directory where sshd maintains semaphores indicating connected SGs
 	ConnectionSemRE       = "sem.(" + SernoRE + ")"                                                            // regular expression for matching SG semaphores (capture group is serno)
 	CryptoAuthKeysPath    = CryptoKeyPath + "/authorized_keys"                                                 // sshd authorized_keys file for remote SGs
@@ -46,10 +49,12 @@ const (
 	MotusGetReceiversUrlT = `https://motus.org/api/receivers/deployments?json={"date":"%s","status":2}`        // URL for motus info on receivers
 	MotusMinLatency       = 10                                                                                 // minimum time (minutes) between queries to the motus metadata server
 	MotusSyncTemplate     = "/sgm_local/sync/method=%d,serno=%s"                                               // template for file touched on sgdata.motus.org to cause sync; %d=port, %s=serno
-	MotusUserKey          = "/home/sg_remote/.ssh/id_ed25519_sgorg_sgdata"                                     // ssh key to use for sync on sgdata.motus.org
-	MotusUser             = "sg@sgdata.motus.org"                                                              // user on sgdata.motus.org; this is who ssh makes us be
+	MotusSSHUserKey       = "/home/sg_remote/.ssh/id_ed25519_sgorg_sgdata"                                     // ssh key to use for sync on sgdata.motus.org
+	MotusSSHUser          = "sg@sgdata.motus.org"                                                              // user on sgdata.motus.org; this is who ssh makes us be
 	SernoRE               = "SG-[0-9A-Za-z]{12}"                                                               // regular expression matching SG serial number
 	SGDBFile              = "/home/sg_remote/sg_remote.sqlite"                                                 // sqlite database with receiver info
+	SGUser                = "bone" // username for logging into remote SG; trivial, but remote SG only allows login via ssh from its local domain
+	SGPassword            = "bone" // password for logging into remote SG
 	ShortTimestampFormat  = "Jan _2 15:04"                                                                     // timestamp format for sync times etc. on status page
 	StatusPageMinLatency  = 5                                                                                  // minimum latency (seconds) between status page updates
 	StatusPagePath        = "/home/johnb/src/sensorgnome-server/website/content/status/index.md"               // path to generated page (needs group write permission and ownership by sg_remote group)
@@ -112,6 +117,9 @@ type ActiveSG struct {
 	TsLastSync time.Time // time at which last synced with motus
 	TsNextSync time.Time // time at which next to be synced with motus
 	TunnelPort int       // ssh tunnel port, if applicable
+	WebPort    int       // if non-zero, the local port mapped via ssh tunnel to the SG's port 80
+	WebUser    int       // if non-zero, ID of the user directly connected to the SG's port 80
+	WebRProxy  *httputil.ReverseProxy // reverse proxy to remote SG's web server
 	Connected  bool      // actually connected?  once we've seen a receiver, we keep this struct in memory,
 	// but set this field to false when it disconnects
 	lock sync.Mutex // lock for any read or write access to fields in this struct
@@ -516,14 +524,14 @@ SyncLoop:
 			if quit {
 				break SyncLoop
 			}
-			cmd := exec.Command("ssh", "-i", MotusUserKey, "-f", "-N", "-T",
+			cmd := exec.Command("ssh", "-i", MotusSSHUserKey, "-f", "-N", "-T",
 				"-oStrictHostKeyChecking=no", "-oExitOnForwardFailure=yes", "-oControlMaster=auto",
 				"-oServerAliveInterval=5", "-oServerAliveCountMax=3",
-				cp, pf, MotusUser)
+				cp, pf, MotusSSHUser)
 			err := cmd.Run()
 			// ignoring error; it is likely just the failure to map an already mapped port
-			cmd = exec.Command("ssh", "-i", MotusUserKey, "-oControlMaster=auto",
-				cp, MotusUser, "touch", tf)
+			cmd = exec.Command("ssh", "-i", MotusSSHUserKey, "-oControlMaster=auto",
+				cp, MotusSSHUser, "touch", tf)
 			err = cmd.Run()
 			if err == nil {
 				Bus.Pub(mbus.Msg{MsgSGSync, SGMsg{ts: synctime, sender: string(serno)}})
@@ -794,7 +802,12 @@ func StatusServer(ctx context.Context, address string) {
 }
 
 // check whether credentials authorize an operation on an SG
-func Auth(serno Serno, op string, creds string) bool {
+//
+// Return a pointer to a MotusUser struct if credentials are valid and user
+// has permission to use Serno.  In this case, as a side effect,
+// the pointer is also stored in the MotusInfo.Users with the userID as key.
+
+func Auth(serno Serno, creds string) *MotusUser {
 	parts := strings.Split(creds, ",")
 	if parts[0] == "motus" && len(parts) == 3 {
 		// credentials are for a motus user
@@ -807,7 +820,15 @@ func Auth(serno Serno, op string, creds string) bool {
 		err = dec.Decode(&auth)
 		if err != nil || auth.ErrorCode != "" {
 			// user authentication failed
-			return false
+			return nil
+		}
+		// authentication succeeded; record user and attributes
+		muser := &MotusUser{UserID: auth.UserID, Email: auth.EmailAddress, ProjectIDs: make(map[int]bool)}
+		i := 0
+		for pid, _ := range auth.Projects {
+			n, _ := strconv.Atoi(pid)
+			muser.ProjectIDs[n] = true
+			i++
 		}
 		// if SG is known at motus, user must belong to project under which it is deployed
 		// otherwise, user must simply be registered with motus
@@ -815,12 +836,13 @@ func Auth(serno Serno, op string, creds string) bool {
 		if known {
 			_, inproj := auth.Projects[strconv.Itoa(dep.ProjectID)]
 			if !inproj {
-				return false
+				return nil
 			}
 		}
-		return true
+		MotusInfo.Users[muser.UserID] = muser
+		return muser
 	}
-	return false
+	return nil
 }
 
 // type representing an SG registration
@@ -884,7 +906,7 @@ func handleRegConn(conn net.Conn) {
 			}
 		}
 		// see whether we need to authenticated request
-		if known && !trusted && (len(buff) <= 16 || !Auth(Serno(serno), "register", string(buff[16:]))) {
+		if known && !trusted && (len(buff) <= 16 || nil == Auth(Serno(serno), string(buff[16:]))) {
 			log.Printf("Attempt to register failed at auth: %s\n", buff)
 			goto Done
 		}
@@ -1062,7 +1084,7 @@ func MakeStatusPage(path string) {
 			status = "No"
 			tcon = sg.TsDisConn
 		}
-		line := fmt.Sprintf(`%s (%d)|%s (%s)|%s|%s|<a href="https://sgdata.motus.org/status?jobsForSerno=%s&excludeSync=0" target="_blank">%s</a>|%s`, serno.(Serno), sg.TunnelPort, rdep.SiteName, MotusInfo.Projects[rdep.ProjectID], status, mkTime(tcon), serno.(Serno), mkTime(sg.TsLastSync), mkTime(sg.TsNextSync))
+		line := fmt.Sprintf(`<a href="https://direct.sensorgnome.org/%s">%s</a> (%d)|%s (%s)|%s|%s|<a href="https://sgdata.motus.org/status?jobsForSerno=%s&excludeSync=0" target="_blank">%s</a>|%s`, serno.(Serno), serno.(Serno), sg.TunnelPort, rdep.SiteName, MotusInfo.Projects[rdep.ProjectID], status, mkTime(tcon), serno.(Serno), mkTime(sg.TsLastSync), mkTime(sg.TsNextSync))
 		lines = append(lines, line)
 		return true
 	})
@@ -1076,15 +1098,24 @@ type RecvDep struct {
 	SiteName  string
 }
 
+// a Motus user
+type MotusUser struct {
+	UserID     int
+	Email      string
+	ProjectIDs map[int]bool // which projectIDs the user belongs to
+}
+
 type MotusCache struct {
 	lastFetch time.Time // time motus data last fetched
 	Latency   time.Duration
-	Projects  map[int]string    // project names by id
-	RecvDeps  map[Serno]RecvDep // receiver deployments by Serno
+	Projects  map[int]string     // project names by id
+	RecvDeps  map[Serno]RecvDep  // receiver deployments by Serno
+	Users     map[int]*MotusUser // motus users who have logged in, by id
 }
 
 var MotusInfo *MotusCache
 
+// result returned by the motus API projects/list
 type APIResProj struct {
 	Data []struct {
 		Id   int
@@ -1092,6 +1123,7 @@ type APIResProj struct {
 	}
 }
 
+// result returned by the motus API receivers/list
 type APIResRecv struct {
 	Data []struct {
 		ReceiverID     string
@@ -1100,6 +1132,7 @@ type APIResRecv struct {
 	}
 }
 
+// result returned by the motus API user/validate
 type APIResAuth struct {
 	UserID       int
 	EmailAddress string
@@ -1110,7 +1143,7 @@ type APIResAuth struct {
 // maintain the motus metadata cache
 func UpdateMotusCache() {
 	if MotusInfo == nil {
-		MotusInfo = &MotusCache{Latency: MotusMinLatency * time.Minute, Projects: make(map[int]string), RecvDeps: make(map[Serno]RecvDep)}
+		MotusInfo = &MotusCache{Latency: MotusMinLatency * time.Minute, Projects: make(map[int]string), RecvDeps: make(map[Serno]RecvDep), Users: make(map[int]*MotusUser)}
 	}
 	now := time.Now()
 	if now.Sub(MotusInfo.lastFetch) > MotusInfo.Latency {
@@ -1187,6 +1220,195 @@ func main() {
 	go DgramSource(ctx, AddressUntrustedDgram, false)
 	go DgramSource(ctx, AddressTrustedDgram, true)
 	go RegistrationServer(ctx, AddressRegServer)
+	go StartDirectServer(ctx, AddressDirectServer)
 	// wait until cancelled (nothing does this, though)
+	<-ctx.Done()
+}
+
+var loginTemplateString string = `<html>
+  <!-- simplified from https://codepen.io/rizwanahmed19/pen/KMMoEN -->
+  <head>
+    <style>
+      *{ box-sizing: border-box; } body{ background-color: #fff;
+      font-family: "Arial", sans-serif; padding: 50px; } .container{
+      margin: 20px auto; padding: 10px; width: 300px; height: 300px;
+      background-color: #fff; border-radius: 5px; } h1{ width: 70%;
+      color: #000; font-size: 24px; margin: 28px auto; margin-bottom:
+      20px; text-align: center; /*padding-top: 40px;*/ } form{
+      /*padding: 15px;*/ text-align: center; } input{ padding: 12px 0;
+      margin-bottom: 10px; border-radius: 3px; border: 2px solid
+      transparent; text-align: center; width: 90%; font-size: 16px;
+      transition: border .2s, background-color .2s; } form .field{
+      background-color: #ddd; } form .field:focus { border: 2px solid
+      #333; } form .btn{ background-color: #666; color: #fff;
+      line-height: 25px; cursor: pointer; } form .btn:hover, form
+      .btn:active { background-color: #333; border: 2px solid #333; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>{{.Msg}}</h1>
+      <form action="{{.Target}}" method="POST">
+	<input type="text" placeholder="username" class="field" name="username">
+	<input type="password" placeholder="password" class="field" name="password">
+	<input type="submit" value="login" class="btn">
+      </form>
+    </div>
+  </body>
+</html>
+`
+var loginTemplate *template.Template = template.Must(template.New("LoginRedirect").Parse(loginTemplateString))
+
+// token for an authenticated session; relates one logged in user to one active SG
+// via a tunnel connection through ssh
+type SessToken struct {
+	Token  string       // crypt token stored in cookie as persistent auth
+	Expiry time.Time    // when token expires
+	UserID int          // user of this session
+	SG *ActiveSG // SG of this session
+}
+
+// map from token string to session token
+var StringToToken map[string]*SessToken
+
+/*
+   handle requests as per: https://github.com/jbrzusto/sensorgnomeServer/issues/5#issuecomment-477696911
+
+   don't worry about proxying ws: and wss: connections because socket.io
+   falls back to HTTP polling
+
+   client connects to e.g. https://direct.sensorgnome.org/SG-1234BBBK5678
+
+   if no cookies in request:
+       redirect to login form
+           form has method, user, password fields; send these in a cookie and redirect to original URL
+
+   if method == POST, user, password cookies:
+       validate user for this serno;
+       if valid, set cookie token and record token, serno in memory store, redirect to
+       otherwise, redirect to login form with error message
+
+   if serno, token cookies:
+       if serno != serno in path, treat user as valid but validate
+       serno in path
+       validate against memory store
+       if not valid, redirect to login form
+       if valid:
+           ensure port map exists for serno
+           reverse proxy request
+
+   In-memory objects:
+
+   map[Token]struct {user MotusUser; projectIDs int[], serno Serno, }
+   map[Serno]int {reverse tunnel HTTP port; 0 means none}
+
+*/
+type LoginPagePars struct {
+	Msg    string
+	Target string
+	Data   string
+}
+
+func RequestLogin(w http.ResponseWriter, pars *LoginPagePars) {
+	loginTemplate.Execute(w, *pars)
+}
+
+func DirectServer(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
+	// serno will be "" unless the path starts with a valid serial number
+	var serno Serno = ""
+	if len(path) > 1 && SernoRegexp.MatchString(path[1:]) {
+		serno = Serno(path[1:16])
+	}
+	// see whether this is a login
+	if serno != "" && r.Method == "POST" {
+		// try validate user
+		if r.ParseForm() == nil {
+			user := Auth(serno, "motus,"+r.Form["username"][0]+","+r.Form["password"][0])
+			if user != nil {
+				// user is authorized for this SG, so generate a token,
+				// see whether the SG is still connected
+				sgp, ok := activeSGs.Load(serno);
+				sg := sgp.(*ActiveSG)
+				if !ok || ! sg.Connected {
+					// validated request, so forward to SG
+					http.Error(w, "This SG is not connected.", http.StatusNotFound)
+					return
+				}
+				sg.lock.Lock()
+				defer sg.lock.Unlock()
+				// set up a tunnel port to the remote SG via its SSH connection
+				if sg.WebPort == 0 {
+					webport := sg.TunnelPort + 10000
+					cmd := exec.Command("sshpass", "-p", SGPassword, "ssh", "-p", strconv.Itoa(sg.TunnelPort), "-f", "-N",
+						"-oStrictHostKeyChecking=no", "-oExitOnForwardFailure=yes", fmt.Sprintf("-L%d:localhost:80", webport), SGUser + "@localhost")
+					if err := cmd.Run(); err != nil {
+						sg.WebPort = 0
+						sg.WebUser = 0
+						sg.WebRProxy = nil
+						http.Error(w, "Unable to connect to this SG.", http.StatusNotFound)
+						return
+					}
+					sg.WebPort = webport
+					sg.WebUser = user.UserID
+					// set up a reverse proxy to the SG's web server
+					sgurl, _ := url.Parse("http://localhost:" + strconv.Itoa(webport))
+					sg.WebRProxy = &httputil.ReverseProxy{
+						Director: func (req *http.Request) {
+							req.URL.Scheme = sgurl.Scheme
+							req.URL.Host = sgurl.Host
+							if len(req.URL.Path) >= 16 && req.URL.Path[1:16] == string(sg.Serno) {
+								req.URL.Path = "/" + req.URL.Path[16:]
+							}
+						},
+					}
+				} else if sg.WebUser != user.UserID {
+					http.Error(w, "This SG is in use by " + MotusInfo.Users[sg.WebUser].Email +" - try again later", http.StatusServiceUnavailable)
+					return
+				}
+
+				// set up a session token representing the connection to this SG
+				token := SessToken{Token: MakeToken(32),
+					Expiry: time.Now().Add(time.Minute * 30),
+					UserID: user.UserID,
+					SG: sg}
+				StringToToken[token.Token] = &token
+				// add cookie and redirect to the original path
+				// which is stored in the form's "data" item
+				// This cookie grants the web client access to the session with this SG
+				cookie := http.Cookie{Name: "sgsession", Value: token.Token, Expires: token.Expiry}
+				http.SetCookie(w, &cookie)
+				http.Redirect(w, r, r.URL.String(), http.StatusFound)
+				return
+			}
+		}
+		lpp := LoginPagePars{Msg: "Motus Login failed - try again", Target: r.URL.String()}
+		RequestLogin(w, &lpp)
+		return
+	}
+	cookie, err := r.Cookie("sgsession")
+	if err != nil {
+		lpp := LoginPagePars{Msg: "Motus Login Required", Target: r.URL.String()}
+		RequestLogin(w, &lpp)
+		return
+	}
+	if token, ok := StringToToken[cookie.Value]; !ok || token.Expiry.Before(time.Now()) || (serno != "" && serno != token.SG.Serno) {
+		cookie := http.Cookie{Name: "sgsession", Value: "", Expires: time.Time{}}
+		http.SetCookie(w, &cookie)
+		lpp := LoginPagePars{Msg: "Motus Login Required", Target: r.URL.String()}
+		RequestLogin(w, &lpp)
+		return
+	} else {
+		// validated request, so forward to SG
+		token.SG.WebRProxy.ServeHTTP(w, r)
+	}
+	// for errors: http.Error(w, "404 page not found", http.StatusNotFound)
+}
+
+func StartDirectServer(ctx context.Context, addr string) {
+	StringToToken = make(map[string]*SessToken)
+	srv := http.Server{Addr: addr, Handler: http.HandlerFunc(DirectServer)}
+	srv.ListenAndServe()
+	defer srv.Shutdown(nil)
 	<-ctx.Done()
 }
