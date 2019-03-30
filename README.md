@@ -16,9 +16,9 @@ This server manages a growing set of networked sensorgnome receivers.
   - [ ] forward
 - [x] provide SG status to clients
 - [x] manage sync of SGs to motus.org (i.e. download and process raw data)
-- [ ] manage remote access to SGs (i.e. let users interact directly with an SG)
-- [ ] allow sensorgnomes from trusted IP addresses to self-register
-- [ ] allow sensorgnomes from untrusted IP addresses to self-register if they
+- [x] manage remote access to SGs (i.e. let users interact directly with an SG)
+- [x] allow sensorgnomes from trusted IP addresses to self-register
+- [x] allow sensorgnomes from untrusted IP addresses to self-register if they
   provide credentials; e.g. from motus.org and/or sensorgnome.org
 - [ ] allow remotely changing on-board tag database
 - [ ] allow remotely changing on-board deployment.txt configuration file
