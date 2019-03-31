@@ -38,7 +38,7 @@ const (
 	TrustedStreamPort     = "59024"
 	AddressTrustedStream  = "localhost:" + TrustedStreamPort                                                   // TCP interface:port on which we receive messages from trusted sources (e.g. SGs connected via ssh)
 	AddressUntrustedDgram = ":59022"                                                                           // UDP interface:port on which we receive messages from untrusted sources
-	AddressDirectServer   = "localhost:59027"                                                                  // TCP interface:port for direct connections to SG web servers
+	AddressRevProxy       = "localhost:59027"                                                                  // TCP interface:port for direct connections to SG web servers
 	ConnectionSemPath     = "/dev/shm"                                                                         // directory where sshd maintains semaphores indicating connected SGs
 	ConnectionSemRE       = "sem.(" + SernoRE + ")"                                                            // regular expression for matching SG semaphores (capture group is serno)
 	CryptoAuthKeysPath    = CryptoKeyPath + "/authorized_keys"                                                 // sshd authorized_keys file for remote SGs
@@ -1221,7 +1221,7 @@ func main() {
 	go DgramSource(ctx, AddressUntrustedDgram, false)
 	go DgramSource(ctx, AddressTrustedDgram, true)
 	go RegistrationServer(ctx, AddressRegServer)
-	go StartDirectServer(ctx, AddressDirectServer)
+	go StartRevProxy(ctx, AddressRevProxy)
 	// wait until cancelled (nothing does this, though)
 	<-ctx.Done()
 }
@@ -1322,7 +1322,10 @@ func RequestLogin(w http.ResponseWriter, pars *LoginPagePars) {
 	loginTemplate.Execute(w, *pars)
 }
 
-func DirectServer(w http.ResponseWriter, r *http.Request) {
+// serve web clients with pages from an ActiveSG, using cookies to
+// protect with credentials, and limiting to one user per SG
+// (The SG web server handles only one connection at a time).
+func RevProxy(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	// serno will be "" unless the path starts with a valid serial number
 	var serno Serno = ""
@@ -1425,10 +1428,10 @@ func DirectServer(w http.ResponseWriter, r *http.Request) {
 	// for errors: http.Error(w, "404 page not found", http.StatusNotFound)
 }
 
-func StartDirectServer(ctx context.Context, addr string) {
+func StartRevProxy(ctx context.Context, addr string) {
 	StringToToken = make(map[string]*SessToken)
 	SernoToToken = make(map[Serno]*SessToken)
-	srv := http.Server{Addr: addr, Handler: http.HandlerFunc(DirectServer)}
+	srv := http.Server{Addr: addr, Handler: http.HandlerFunc(RevProxy)}
 	srv.ListenAndServe()
 	defer srv.Shutdown(nil)
 	<-ctx.Done()
