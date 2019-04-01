@@ -1415,7 +1415,8 @@ func RevProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if token, ok := StringToToken[cookie.Value]; !ok || token.Expiry.Before(time.Now()) || (serno != "" && serno != token.SG.Serno) {
-		cookie := http.Cookie{Name: "sgsession", Value: "", Expires: time.Time{}}
+		// clear cookie on client by setting expiry time back many hours from now
+		cookie := http.Cookie{Name: "sgsession", Value: "", Expires: time.Now().Add(-1024 * time.Hour)}
 		http.SetCookie(w, &cookie)
 		lpp := LoginPagePars{Msg: "Motus Login Required", Target: r.URL.String()}
 		RequestLogin(w, &lpp)
