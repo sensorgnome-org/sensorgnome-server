@@ -112,15 +112,15 @@ var SernoRegexp = regexp.MustCompile(SernoRE)
 
 // an SG we have seen recently
 type ActiveSG struct {
-	Serno      Serno                  // serial number; e.g. "SG-1234BBBK9812"
-	TsConn     time.Time              // time at which connected
-	TsDisConn  time.Time              // time at which last disconnected
-	TsLastSync time.Time              // time at which last synced with motus
-	TsNextSync time.Time              // time at which next to be synced with motus
-	TunnelPort int                    // ssh tunnel port, if applicable
-	WebUser    int                    // if non-zero, ID of the user directly connected to the SG's web server
-	Proxy      *Proxy                 // if non-nil, reverse proxy to the SG's web server
-	Connected  bool                   // actually connected?  once we've seen a receiver, we keep this struct in memory,
+	Serno      Serno     // serial number; e.g. "SG-1234BBBK9812"
+	TsConn     time.Time // time at which connected
+	TsDisConn  time.Time // time at which last disconnected
+	TsLastSync time.Time // time at which last synced with motus
+	TsNextSync time.Time // time at which next to be synced with motus
+	TunnelPort int       // ssh tunnel port, if applicable
+	WebUser    int       // if non-zero, ID of the user directly connected to the SG's web server
+	Proxy      *Proxy    // if non-nil, reverse proxy to the SG's web server
+	Connected  bool      // actually connected?  once we've seen a receiver, we keep this struct in memory,
 	// but set this field to false when it disconnects
 	lock sync.Mutex // lock for any read or write access to fields in this struct
 }
@@ -1177,7 +1177,6 @@ func UpdateMotusCache() {
 	}
 }
 
-
 var loginTemplateString string = `<html>
   <!-- simplified from https://codepen.io/rizwanahmed19/pen/KMMoEN -->
   <head>
@@ -1372,11 +1371,10 @@ func MasterRevProxy(ctx context.Context, addr string) {
 	<-ctx.Done()
 }
 
-
 type Proxy struct {
 	WebMapProc *os.Process            // ssh process maintaining the tunnel portmap to the SG's port 80
 	WebPort    int                    // the local port mapped via ssh tunnel to the SG's port 80
-	RProxy      *httputil.ReverseProxy // reverse proxy server to remote SG's web server
+	RProxy     *httputil.ReverseProxy // reverse proxy server to remote SG's web server
 }
 
 // goroutine to set-up a reverse web proxy for this SG
@@ -1393,7 +1391,7 @@ func InitProxy(sg *ActiveSG) {
 	cmd := exec.Command("sshpass", "-p", SGPassword, "ssh", "-p", strconv.Itoa(sg.TunnelPort), "-N",
 		"-oStrictHostKeyChecking=no", "-oExitOnForwardFailure=yes", fmt.Sprintf("-L%d:localhost:80", webport), SGUser+"@localhost")
 	for {
-		if ! sg.Connected {
+		if !sg.Connected {
 			return
 		}
 		if err := cmd.Start(); err == nil {
@@ -1401,13 +1399,13 @@ func InitProxy(sg *ActiveSG) {
 		}
 		// some ugly logic to check on forwarding success
 		// wait for 3 seconds to see whether port mapping succeeds
-		time.Sleep(3*time.Second)
-		if ! cmd.ProcessState.Exited() {
+		time.Sleep(3 * time.Second)
+		if !cmd.ProcessState.Exited() {
 			break
 		}
 		// wait a bit before retrying; we might have won a race with
 		// the SG's mapping of its tunnelPort
-		time.Sleep(10*time.Second)
+		time.Sleep(10 * time.Second)
 	}
 	px.WebPort = webport
 	px.WebMapProc = cmd.Process
