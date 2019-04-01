@@ -118,9 +118,8 @@ type ActiveSG struct {
 	TsLastSync time.Time              // time at which last synced with motus
 	TsNextSync time.Time              // time at which next to be synced with motus
 	TunnelPort int                    // ssh tunnel port, if applicable
-	WebPort    int                    // if non-zero, the local port mapped via ssh tunnel to the SG's port 80
-	WebUser    int                    // if non-zero, ID of the user directly connected to the SG's port 80
-	WebRProxy  *httputil.ReverseProxy // reverse proxy to remote SG's web server
+	WebUser    int                    // if non-zero, ID of the user directly connected to the SG's web server
+	Proxy      *Proxy                 // if non-nil, reverse proxy to the SG's web server
 	Connected  bool                   // actually connected?  once we've seen a receiver, we keep this struct in memory,
 	// but set this field to false when it disconnects
 	lock sync.Mutex // lock for any read or write access to fields in this struct
@@ -477,6 +476,7 @@ func SGMinder() {
 			case MsgSGConnect:
 				sg.TsConn = m.ts
 				sg.Connected = true
+				go InitProxy(sg)
 			case MsgSGDisconnect:
 				sg.TsDisConn = m.ts
 				sg.Connected = false
@@ -1177,54 +1177,6 @@ func UpdateMotusCache() {
 	}
 }
 
-func main() {
-	rand.Seed(time.Now().UnixNano())
-	Bus = mbus.NewMbus()
-	var ctx, _ = context.WithCancel(context.Background())
-	DB = OpenDB(SGDBFile)
-
-	//
-	//         Message Consumers
-	//
-	// Each consumer does two things:
-	//   - subscribe to messages; happens immediately in the main goroutine
-	//   - handle subscribed messages; happens in a new goroutine launched by the consumer
-	// So as soon as the consumer's main function returns, it is ready to
-	// receive messages on topics it has subscribed to. i.e. no messages will be missed,
-	// even if the new goroutine has not run yet.
-
-	// record messages to a database
-	DBRecorder()
-
-	// maintain the list of active SGs
-	SGMinder()
-
-	// manage sync jobs on attached SGs
-	SyncManager()
-
-	// messageDump() // DEBUG
-
-	// maintain an up-to-date status page, but don't update more than
-	// once every 5 seconds and don't wait longer than that to update
-	// when needed.
-	StatusPageMaintainer(StatusPagePath, StatusPageMinLatency*time.Second)
-
-	//
-	//         Message Producers
-	//
-	// Producers are launched after consumers have subscribed
-	// to message topics.
-
-	ConnectionWatcher(ctx, ConnectionSemPath, ConnectionSemRE)
-	go StatusServer(ctx, AddressStatusServer)
-	go TrustedStreamSource(ctx, AddressTrustedStream)
-	go DgramSource(ctx, AddressUntrustedDgram, false)
-	go DgramSource(ctx, AddressTrustedDgram, true)
-	go RegistrationServer(ctx, AddressRegServer)
-	go StartRevProxy(ctx, AddressRevProxy)
-	// wait until cancelled (nothing does this, though)
-	<-ctx.Done()
-}
 
 var loginTemplateString string = `<html>
   <!-- simplified from https://codepen.io/rizwanahmed19/pen/KMMoEN -->
@@ -1315,8 +1267,8 @@ type LoginPagePars struct {
 }
 
 func RequestLogin(w http.ResponseWriter, pars *LoginPagePars) {
-	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Expires", "0")
 	loginTemplate.Execute(w, *pars)
@@ -1325,7 +1277,7 @@ func RequestLogin(w http.ResponseWriter, pars *LoginPagePars) {
 // serve web clients with pages from an ActiveSG, using cookies to
 // protect with credentials, and limiting to one user per SG
 // (The SG web server handles only one connection at a time).
-func RevProxy(w http.ResponseWriter, r *http.Request) {
+func RevProxyHandler(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	// serno will be "" unless the path starts with a valid serial number
 	var serno Serno = ""
@@ -1350,29 +1302,7 @@ func RevProxy(w http.ResponseWriter, r *http.Request) {
 				sg.lock.Lock()
 				defer sg.lock.Unlock()
 				// set up a tunnel port to the remote SG via its SSH connection
-				if sg.WebPort == 0 {
-					webport := sg.TunnelPort + 10000
-					cmd := exec.Command("sshpass", "-p", SGPassword, "ssh", "-p", strconv.Itoa(sg.TunnelPort), "-f", "-N",
-						"-oStrictHostKeyChecking=no", "-oExitOnForwardFailure=yes", fmt.Sprintf("-L%d:localhost:80", webport), SGUser+"@localhost")
-					if err := cmd.Run(); err != nil {
-						sg.WebPort = 0
-						sg.WebRProxy = nil
-						http.Error(w, "Unable to connect to this SG.", http.StatusNotFound)
-						return
-					}
-					sg.WebPort = webport
-					// set up a reverse proxy to the SG's web server
-					sgurl, _ := url.Parse("http://localhost:" + strconv.Itoa(webport))
-					sg.WebRProxy = &httputil.ReverseProxy{
-						Director: func(req *http.Request) {
-							req.URL.Scheme = sgurl.Scheme
-							req.URL.Host = sgurl.Host
-							if len(req.URL.Path) >= 16 && req.URL.Path[1:16] == string(sg.Serno) {
-								req.URL.Path = "/" + req.URL.Path[16:]
-							}
-						},
-					}
-				} else if sg.WebUser != 0 && sg.WebUser != user.UserID {
+				if sg.WebUser != 0 && sg.WebUser != user.UserID {
 					// see if the existing session for this SG has expired
 					oldtoken := SernoToToken[serno]
 					now := time.Now()
@@ -1424,16 +1354,121 @@ func RevProxy(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// validated request, so forward to SG
 		token.LastReq = time.Now()
-		token.SG.WebRProxy.ServeHTTP(w, r)
+		token.SG.Proxy.RProxy.ServeHTTP(w, r)
 	}
 	// for errors: http.Error(w, "404 page not found", http.StatusNotFound)
 }
 
-func StartRevProxy(ctx context.Context, addr string) {
+// server to connect web clients with credentials to SG web servers
+func MasterRevProxy(ctx context.Context, addr string) {
 	StringToToken = make(map[string]*SessToken)
 	SernoToToken = make(map[Serno]*SessToken)
-	srv := http.Server{Addr: addr, Handler: http.HandlerFunc(RevProxy)}
+	srv := http.Server{Addr: addr, Handler: http.HandlerFunc(RevProxyHandler)}
 	srv.ListenAndServe()
 	defer srv.Shutdown(nil)
+	<-ctx.Done()
+}
+
+
+type Proxy struct {
+	WebMapProc *os.Process            // ssh process maintaining the tunnel portmap to the SG's port 80
+	WebPort    int                    // the local port mapped via ssh tunnel to the SG's port 80
+	RProxy      *httputil.ReverseProxy // reverse proxy server to remote SG's web server
+}
+
+// goroutine to set-up a reverse web proxy for this SG
+// this goroutine exists when the SG disconnects
+func InitProxy(sg *ActiveSG) {
+	if sg.Proxy != nil {
+		sg.Proxy.WebMapProc.Kill()
+		sg.lock.Lock()
+		sg.Proxy = nil
+		sg.lock.Unlock()
+	}
+	webport := sg.TunnelPort + 10000
+	px := &Proxy{WebPort: webport}
+	cmd := exec.Command("sshpass", "-p", SGPassword, "ssh", "-p", strconv.Itoa(sg.TunnelPort), "-N",
+		"-oStrictHostKeyChecking=no", "-oExitOnForwardFailure=yes", fmt.Sprintf("-L%d:localhost:80", webport), SGUser+"@localhost")
+	for {
+		if ! sg.Connected {
+			return
+		}
+		if err := cmd.Start(); err == nil {
+			break
+		}
+		// some ugly logic to check on forwarding success
+		// wait for 3 seconds to see whether port mapping succeeds
+		time.Sleep(3*time.Second)
+		if ! cmd.ProcessState.Exited() {
+			break
+		}
+		// wait a bit before retrying; we might have won a race with
+		// the SG's mapping of its tunnelPort
+		time.Sleep(10*time.Second)
+	}
+	px.WebPort = webport
+	px.WebMapProc = cmd.Process
+	// set up a reverse proxy to the SG's web server
+	sgurl, _ := url.Parse("http://localhost:" + strconv.Itoa(webport))
+	px.RProxy = &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			req.URL.Scheme = sgurl.Scheme
+			req.URL.Host = sgurl.Host
+			if len(req.URL.Path) >= 16 && req.URL.Path[1:16] == string(sg.Serno) {
+				req.URL.Path = "/" + req.URL.Path[16:]
+			}
+		},
+	}
+	sg.lock.Lock()
+	sg.Proxy = px
+	sg.lock.Unlock()
+}
+
+func main() {
+	rand.Seed(time.Now().UnixNano())
+	Bus = mbus.NewMbus()
+	var ctx, _ = context.WithCancel(context.Background())
+	DB = OpenDB(SGDBFile)
+
+	//
+	//         Message Consumers
+	//
+	// Each consumer does two things:
+	//   - subscribe to messages; happens immediately in the main goroutine
+	//   - handle subscribed messages; happens in a new goroutine launched by the consumer
+	// So as soon as the consumer's main function returns, it is ready to
+	// receive messages on topics it has subscribed to. i.e. no messages will be missed,
+	// even if the new goroutine has not run yet.
+
+	// record messages to a database
+	DBRecorder()
+
+	// maintain the list of active SGs
+	SGMinder()
+
+	// manage sync jobs on attached SGs
+	SyncManager()
+
+	// messageDump() // DEBUG
+
+	// maintain an up-to-date status page, but don't update more than
+	// once every 5 seconds and don't wait longer than that to update
+	// when needed.
+	StatusPageMaintainer(StatusPagePath, StatusPageMinLatency*time.Second)
+
+	//
+	//         Message Producers
+	//
+	// Producers are launched after consumers have subscribed
+	// to message topics.
+
+	ConnectionWatcher(ctx, ConnectionSemPath, ConnectionSemRE)
+	go StatusServer(ctx, AddressStatusServer)
+	go TrustedStreamSource(ctx, AddressTrustedStream)
+	go DgramSource(ctx, AddressUntrustedDgram, false)
+	go DgramSource(ctx, AddressTrustedDgram, true)
+	go RegistrationServer(ctx, AddressRegServer)
+	go MasterRevProxy(ctx, AddressRevProxy)
+	// wait until cancelled (nothing does this, though)
 	<-ctx.Done()
 }
