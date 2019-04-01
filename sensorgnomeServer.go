@@ -1201,9 +1201,11 @@ var loginTemplateString string = `<html>
   <body>
     <div class="container">
       <h1>{{.Msg}}</h1>
-      <form action="{{.Target}}" method="POST">
+      <form action="/login" method="POST">
 	<input type="text" placeholder="username" class="field" name="username">
 	<input type="password" placeholder="password" class="field" name="password">
+	<input type="hidden" name="target" value="{{.Target}}">
+	<input type="hidden" name="serno" value="{{.Serno}}">
 	<input type="submit" value="login" class="btn">
       </form>
     </div>
@@ -1263,7 +1265,7 @@ var SernoToToken map[Serno]*SessToken
 type LoginPagePars struct {
 	Msg    string
 	Target string
-	Data   string
+	Serno  string
 }
 
 func RequestLogin(w http.ResponseWriter, pars *LoginPagePars) {
@@ -1285,9 +1287,10 @@ func RevProxyHandler(w http.ResponseWriter, r *http.Request) {
 		serno = Serno(path[1:16])
 	}
 	// see whether this is a login
-	if serno != "" && r.Method == "POST" {
+	if path == "/login" && r.Method == "POST" {
 		// try validate user
 		if r.ParseForm() == nil {
+			serno = Serno(r.Form["serno"][0])
 			user := Auth(serno, "motus,"+r.Form["username"][0]+","+r.Form["password"][0])
 			if user != nil {
 				// user is authorized for this SG, so generate a token,
@@ -1330,17 +1333,17 @@ func RevProxyHandler(w http.ResponseWriter, r *http.Request) {
 				// This cookie grants the web client access to the session with this SG
 				cookie := http.Cookie{Name: "sgsession", Value: token.Token, Expires: token.Expiry}
 				http.SetCookie(w, &cookie)
-				http.Redirect(w, r, r.URL.String(), http.StatusFound)
+				http.Redirect(w, r, r.Form["target"][0], http.StatusFound)
 				return
 			}
 		}
-		lpp := LoginPagePars{Msg: "Motus Login failed - try again", Target: r.URL.String()}
+		lpp := LoginPagePars{Msg: "Motus Login failed - try again", Target: r.URL.String(), Serno: string(serno)}
 		RequestLogin(w, &lpp)
 		return
 	}
 	cookie, err := r.Cookie("sgsession")
 	if err != nil {
-		lpp := LoginPagePars{Msg: "Motus Login Required", Target: r.URL.String()}
+		lpp := LoginPagePars{Msg: "Motus Login Required", Target: r.URL.String(), Serno: string(serno)}
 		RequestLogin(w, &lpp)
 		return
 	}
@@ -1348,7 +1351,7 @@ func RevProxyHandler(w http.ResponseWriter, r *http.Request) {
 		// clear cookie on client by setting expiry time back many hours from now
 		cookie := http.Cookie{Name: "sgsession", Value: "", Expires: time.Now().Add(-1024 * time.Hour)}
 		http.SetCookie(w, &cookie)
-		lpp := LoginPagePars{Msg: "Motus Login Required", Target: r.URL.String()}
+		lpp := LoginPagePars{Msg: "Motus Login Required", Target: r.URL.String(), Serno: string(serno)}
 		RequestLogin(w, &lpp)
 		return
 	} else {
