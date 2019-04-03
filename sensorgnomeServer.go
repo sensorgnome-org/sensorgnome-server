@@ -1053,7 +1053,7 @@ func StatusPageMaintainer(path string, latency time.Duration) {
 }
 
 func mkTime(t time.Time) string {
-	if t.IsZero() {
+	if t.IsZero() || t.Unix() == 0 {
 		return "?"
 	}
 	return t.Format(ShortTimestampFormat)
