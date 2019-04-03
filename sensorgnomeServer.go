@@ -403,7 +403,6 @@ func ConnectionWatcher(ctx context.Context, dir string, sgRE string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer watcher.Close()
 
 	err = watcher.Add(dir)
 	if err != nil {
@@ -414,6 +413,7 @@ func ConnectionWatcher(ctx context.Context, dir string, sgRE string) {
 			select {
 			case event, ok := <-watcher.Events:
 				if !ok {
+					watcher.Close()
 					return
 				}
 				parts := re.FindStringSubmatch(event.Name)
