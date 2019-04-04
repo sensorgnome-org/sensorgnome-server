@@ -1388,8 +1388,17 @@ func InitProxy(sg *ActiveSG) {
 	}
 	webport := sg.TunnelPort + 10000
 	px := &Proxy{WebPort: webport}
+	// On some beaglebone SGs, the web server listens only on the USB network interface.
+	// On other beaglebone SGs and all Pi SGs, the web server will be available on
+	// (at least) the loopback interface.
+	var iface string
+	if sg.Serno[7:9] == "BB" { // e.g. "SG-1234BBBK5678"
+		iface = "192.168.7.2"
+	} else {
+		iface = "localhost"
+	}
 	cmd := exec.Command("sshpass", "-p", SGPassword, "ssh", "-p", strconv.Itoa(sg.TunnelPort), "-N",
-		"-oStrictHostKeyChecking=no", "-oExitOnForwardFailure=yes", fmt.Sprintf("-L%d:localhost:80", webport), SGUser+"@localhost")
+		"-oStrictHostKeyChecking=no", "-oExitOnForwardFailure=yes", fmt.Sprintf("-L%d:%s:80", webport, iface), SGUser+"@localhost")
 	for {
 		if !sg.Connected {
 			return
