@@ -82,6 +82,98 @@ which communicates with this server's registration listener on port 59026
 - maintain_ssh_tunnel: map localhost:59024 to sensorgnome.org:59024
 - new file `/etc/network/if-up.d/init_ssh_tunnel` runs `maintain_ssh_tunnel` when
   a non-local, non-usb interface comes up:
+
+### BBBK 2017-03-06 ###
+
+- same changes as above
+
+### Receivers completed ###
+- SG-1614BBBK1666
+- SG-1614BBBK1807
+
+### Clean up of tunnel vs. streaming ###
+
+- ultimate new setup on server side:
+  - TCP port 59022: sshd_sg, as before
+  - UDP port 59022: accept signed datagrams from the network, as before but now in same program
+  - UDP port 59023: accept unsigned datagrams from localhost (*TBD*).
+  - TCP port 59024: accept streams over an ssh (and thus authenticated) connection;
+                    the stream begins with the SG's serial number
+
+This way:
+- datagrams authenticated by embedded signature, when needed (i.e. sent from arbitrary hosts
+  which are not using ssh)
+- datagrams authenticated by virtue of arriving over authenticated channel (ssh) and not signed
+  (first
+- no race conditions between mapping ports and running a program over
+  ssh (see https://github.com/jbrzusto/openssh-portable/issues/1)
+
+But this requires retooling SG-side code to include the serno on all messages sent over
+the authenticated channel.
+
+### `/home/bone/proj/bonedongle/master/uploader.js` ###
+The the child process is now
+```
+nc -u localhost 59024
+```
+rather than
+```
+usr/bin/ssh -T -o ControlMaster=auto", -o ControlPath=/tmp/sgremote", -o ServerAliveInterval=5", -o ServerAliveCountMax=3",-i /home/bone/.ssh/id_dsa", -p 59022", sg_remote@sensorgnome.org", /home/sg_remote/code/sg_remote
+```
+We also modify the first line of startup-info sent by the uploader to simply be the SG's serial number (e.g. SG-1234BBBK5678)
+to identify the stream:
+
+```js
+Uploader.prototype.pushStartupInfo = function() {
+    var ts = (new Date()).getTime()/1000;
+    this.child.stdin.write( "SG-" + Machine.machineID + "\n" + "M," + ts + ",machineID," + Machine.machineID + "\n" +
+                            "M," + ts + ",bootCount," + Machine.bootCount + "\n");
+};
+```
+### `/etc/hosts` ###
+Change to hardwire new sensorgnome.org address:
+```sh
+sed -i -e '/sensorgnome.org/d' /etc/hosts
+echo 108.63.14.166 sensorgnome.org >> /etc/hosts
+sed -i -e '/StrictHostKeyChecking/s/^.*$/StrictHostKeyChecking no/' /etc/ssh/ssh_config
+```
+
+### `/home/bone/proj/bonedongle/scripts/maintain_ssh_tunnel`
+
+Drop use of autossh (since we're running from a cronjob anyway) and map streaming port:
+```sh
+# maintain a reverse tunnel portmap to sensorgnome.org
+# run every 5 minutes from /etc/cron.d
+#
+# map server:TUNNEL_PORT -> localhost:22  (ssh reverse tunnel)
+# map localhost:59024 -> server:59024     (message streaming)
+
+TUNNEL_PORT_FILE=/home/bone/.ssh/tunnel_port
+UNIQUE_KEY_FILE=/home/bone/.ssh/id_dsa
+REMOTE_USER=sg_remote
+REMOTE_HOST=sensorgnome.org
+REMOTE_SSH_PORT=59022
+REMOTE_STREAM_PORT=59024
+LOCAL_STREAM_PORT=59024
+
+if [[ -f $TUNNEL_PORT_FILE ]]; then
+    read TUNNEL_PORT < $TUNNEL_PORT_FILE
+    ssh -f -N -T \
+        -L$LOCAL_STREAM_PORT:localhost:$REMOTE_STREAM_PORT \
+        -R$TUNNEL_PORT:localhost:22 \
+        -o ControlMaster=auto \
+        -o ControlPath=/tmp/sgremote \
+        -o ServerAliveInterval=5 \
+        -o ServerAliveCountMax=3 \
+        -i $UNIQUE_KEY_FILE \
+        -p $REMOTE_SSH_PORT \
+        $REMOTE_USER@$REMOTE_HOST
+fi
+```
+
+### `/etc/network/if-up.d/init_ssh_tunnel` ###
+
+This file attempts to set up a tunnel as soon a non-local network interface comes up:
 ```bash
 #!/bin/bash
 #
@@ -93,10 +185,5 @@ fi
 exit 0
 ```
 
-### BBBK 2017-03-06 ###
-
-- same changes as above
-
-### Receivers completed ###
-- SG-1614BBBK1666
-- SG-1614BBBK1807
+Also note that some BBKs are running a special release that allows them to send signed datagrams,
+but unfortunately we hardcoded the host address to 131.162.131.200 in uploader.js
