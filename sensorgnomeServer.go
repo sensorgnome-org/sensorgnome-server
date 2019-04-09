@@ -3,7 +3,9 @@ package main
 import (
 	//	"bytes"
 	"context"
+	cryptorand "crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"github.com/fsnotify/fsnotify"
@@ -40,7 +42,7 @@ const (
 	AddressUntrustedDgram = ":59022"                                                                           // UDP interface:port on which we receive messages from untrusted sources
 	AddressRevProxy       = "localhost:59027"                                                                  // TCP interface:port for direct connections to SG web servers
 	ConnectionSemPath     = "/dev/shm"                                                                         // directory where sshd maintains semaphores indicating connected SGs
-	ConnectionSemRE       = "sem.(" + SernoRE + ")"                                                            // regular expression for matching SG semaphores (capture group is serno)
+	ConnectionSemRE       = "sem.(" + SernoBareRE + ")"                                                        // regular expression for matching SG semaphores (capture group is serno)
 	CryptoAuthKeysPath    = CryptoKeyPath + "/authorized_keys"                                                 // sshd authorized_keys file for remote SGs
 	CryptoKeyPath         = "/home/sg_remote/.ssh"                                                             // where crypto keys for remote SGs are stored
 	MotusControlPath      = "/home/sg_remote/sgdata.ssh"                                                       // control path for multiplexing port mappings to sgdata.motus.org
@@ -52,8 +54,9 @@ const (
 	MotusSSHUserKey       = "/home/sg_remote/.ssh/id_ed25519_sgorg_sgdata"                                     // ssh key to use for sync on sgdata.motus.org
 	MotusSSHUser          = "sg@sgdata.motus.org"                                                              // user on sgdata.motus.org; this is who ssh makes us be
 	ProxyLoginPath        = "/sgsrvlogin"                                                                      // path to login to direct.sensorgnome.org; must not be a valid path for an SG's own webserver
-	SernoRE               = "SG-[0-9A-Za-z]{12}"                                                               // regular expression matching SG serial number
-	SessTokenKeepAlive    = time.Minute * 2                                                                    // how long before an unused direct connection to an SG can be bumped by another user
+	SernoBareRE           = "(?i)SG-[0-9A-Za-z]{12}(_[0-9])?"                                                      // regular expression matching SG serial number anywhere
+	SernoRE               = "^" + SernoBareRE                                                                  // regular expression matching SG serial number at start of target
+	SessionKeepAlive      = time.Minute * 1                                                                    // how long before an unused direct connection to an SG can be bumped by another user
 	SGDBFile              = "/home/sg_remote/sg_remote.sqlite"                                                 // sqlite database with receiver info
 	SGUser                = "bone"                                                                             // username for logging into remote SG; trivial, but remote SG only allows login via ssh from its local domain
 	SGPassword            = "bone"                                                                             // password for logging into remote SG
@@ -108,7 +111,7 @@ var Bus mbus.Mbus
 // type representing an SG serial number
 type Serno string
 
-// regular expression matching an SG serial number
+// regular expression matching an SG serial number at start
 var SernoRegexp = regexp.MustCompile(SernoRE)
 
 // an SG we have seen recently
@@ -360,9 +363,11 @@ func SQL(q dbQuery, pars []interface{}, res []interface{}) (rv bool) {
 	return
 }
 
-// wrap an arbitrary set of interface{} objects into a slice
+// wrap a variadic list of interface{} objects into a slice
 //
-// 'c' for combine, as in R
+// 'c' for combine, as in R; the point is to effectively allow multiple
+// variadic arguments for a single function; e.g. f(c(a1,a2,a3),c(b1,b2,b3,b4))
+
 func c(v ...interface{}) []interface{} {
 	// trivial implementation, courtesy of `...` semantics
 	return v
@@ -803,20 +808,17 @@ func StatusServer(ctx context.Context, address string) {
 	}
 }
 
-// check whether credentials authorize an operation on an SG
+// authenticate user
 //
-// Return a pointer to a MotusUser struct if credentials are valid and user
-// has permission to use Serno.  In this case, as a side effect,
-// the pointer is also stored in the MotusInfo.Users with the userID as key.
-
-func Auth(serno Serno, creds string) *MotusUser {
-	parts := strings.Split(creds, ",")
-	if parts[0] == "motus" && len(parts) == 3 {
-		// credentials are for a motus user
-		// validate them
+// Return a pointer to a MotusUser if credentials are valid.
+// In this case, as a side effect, the pointer is also stored in the
+// MotusInfo.Users with the userID as key
+func Authenticate(creds []string) *MotusUser {
+	switch creds[0] {
+	case "motus":
 		nows := time.Now().Format("20060102150405")
 		client := &http.Client{Timeout: 30 * time.Second}
-		res, err := client.Get(fmt.Sprintf(MotusAuthUser, nows, url.QueryEscape(parts[1]), url.QueryEscape(parts[2])))
+		res, err := client.Get(fmt.Sprintf(MotusAuthUser, nows, url.QueryEscape(creds[1]), url.QueryEscape(creds[2])))
 		var auth APIResAuth
 		dec := json.NewDecoder(res.Body)
 		err = dec.Decode(&auth)
@@ -832,19 +834,33 @@ func Auth(serno Serno, creds string) *MotusUser {
 			muser.ProjectIDs[n] = true
 			i++
 		}
-		// if SG is known at motus, user must belong to project under which it is deployed
-		// otherwise, user must simply be registered with motus
-		dep, known := MotusInfo.RecvDeps[serno]
-		if known {
-			_, inproj := auth.Projects[strconv.Itoa(dep.ProjectID)]
-			if !inproj {
-				return nil
-			}
-		}
 		MotusInfo.Users[muser.UserID] = muser
 		return muser
+	default:
+		// TODO: other authentication domains
+		return nil
 	}
-	return nil
+}
+
+// check whether a user is authorized to access an SG
+//
+// returns true if yes, false otherwise.
+func Authorized(userID int, serno Serno) bool {
+	// user is authorized if SG is deployed by a motus project to which the
+	// user belongs.
+	user := MotusInfo.Users[userID]
+	if dep, known := MotusInfo.RecvDeps[serno]; known && user != nil && user.ProjectIDs[dep.ProjectID] {
+		return true
+	}
+	return false
+}
+
+// check whether credentials are for a user who is authorized to use a device
+func AuthAuth(serno Serno, creds []string) bool {
+	if user := Authenticate(creds); user != nil && Authorized(user.UserID, serno) {
+		return true
+	}
+	return false
 }
 
 // type representing an SG registration
@@ -891,8 +907,8 @@ func handleRegConn(conn net.Conn) {
 		if err != nil {
 			goto Done
 		}
-		serno := buff[0:15]
-		if !SernoRegexp.Match(serno) {
+		serno := string(SernoRegexp.Find(buff))
+		if serno == "" {
 			// invalid serno
 			goto Done
 		}
@@ -900,15 +916,15 @@ func handleRegConn(conn net.Conn) {
 		trusted := TrustedIPAddrRegexp.MatchString(conn.RemoteAddr().String())
 		// has this SG been seen before?
 		var reg Registration
-		known := SQL(DBQGetRegistration, c(string(serno)), c(&reg.tunnelPort, &reg.pubKey, &reg.privKey))
+		known := SQL(DBQGetRegistration, c(serno), c(&reg.tunnelPort, &reg.pubKey, &reg.privKey))
 		if !known {
 			if err = RegisterSG(Serno(serno), &reg); err != nil {
 				log.Printf("Unable to register new receiver %s: %s", string(serno), err.Error())
 				goto Done
 			}
 		}
-		// see whether we need to authenticated request
-		if known && !trusted && (len(buff) <= 16 || nil == Auth(Serno(serno), string(buff[16:]))) {
+		// see whether we need to authenticate request
+		if known && !trusted && (len(buff) == len(serno) || !AuthAuth(Serno(serno), strings.Split(string(buff[len(serno):]), ","))) {
 			log.Printf("Attempt to register failed at auth: %s\n", buff)
 			goto Done
 		}
@@ -1086,7 +1102,7 @@ func MakeStatusPage(path string) {
 			status = "No"
 			tcon = sg.TsDisConn
 		}
-		line := fmt.Sprintf(`<a href="https://direct.sensorgnome.org/%s">%s</a> (%d)|%s (%s)|%s|%s|<a href="https://sgdata.motus.org/status?jobsForSerno=%s&excludeSync=0" target="_blank">%s</a>|%s`, serno.(Serno), serno.(Serno), sg.TunnelPort, rdep.SiteName, MotusInfo.Projects[rdep.ProjectID], status, mkTime(tcon), serno.(Serno), mkTime(sg.TsLastSync), mkTime(sg.TsNextSync))
+		line := fmt.Sprintf(`<a href="https://%s.sensorgnome.org">%s</a> (%d)|%s (%s)|%s|%s|<a href="https://sgdata.motus.org/status?jobsForSerno=%s&excludeSync=0" target="_blank">%s</a>|%s`, serno.(Serno), serno.(Serno), sg.TunnelPort, rdep.SiteName, MotusInfo.Projects[rdep.ProjectID], status, mkTime(tcon), serno.(Serno), mkTime(sg.TsLastSync), mkTime(sg.TsNextSync))
 		lines = append(lines, line)
 		return true
 	})
@@ -1204,8 +1220,7 @@ var loginTemplateString string = `<html>
       <form action="{{.LoginPath}}" method="POST">
 	<input type="text" placeholder="username" class="field" name="username">
 	<input type="password" placeholder="password" class="field" name="password">
-	<input type="hidden" name="target" value="{{.Target}}">
-	<input type="hidden" name="serno" value="{{.Serno}}">
+	<input type="hidden" name="target" value="https://{{.Serno}}.sensorgnome.org/{{.Target}}">
 	<input type="submit" value="login" class="btn">
       </form>
     </div>
@@ -1214,21 +1229,27 @@ var loginTemplateString string = `<html>
 `
 var loginTemplate *template.Template = template.Must(template.New("LoginRedirect").Parse(loginTemplateString))
 
-// token for an authenticated session; relates one logged in user to one active SG
-// via a tunnel connection through ssh
-type SessToken struct {
-	Token   string    // crypt token stored in cookie as persistent auth
-	Expiry  time.Time // when token expires
-	LastReq time.Time // time of last request from client
-	UserID  int       // user of this session
-	SG      *ActiveSG // SG of this session
+// token for an authenticated user
+type UserToken struct {
+	Token  string    // crypt token stored in cookie as persistent auth
+	Expiry time.Time // when token expires
+	UserID int       // user of this session
 }
 
-// map from token string to session token
-var StringToToken map[string]*SessToken
+// sensorgnome  session; relates one UserToken to one ActiveSG
+// via a tunnel connection through ssh.  A UserToken can be used for
+// more than one session at a time.
+type SGSession struct {
+	SG      *ActiveSG  // SG of this session
+	Token   *UserToken // token of user this session belongs to
+	LastReq time.Time  // time of last request from client
+}
 
-// map from Serno to session token
-var SernoToToken map[Serno]*SessToken
+// map from token string to user token
+var StringToToken map[string]*UserToken
+
+// map from serno to SGSession
+var SernoToSess map[Serno]*SGSession
 
 /*
    handle requests as per: https://github.com/jbrzusto/sensorgnomeServer/issues/5#issuecomment-477696911
@@ -1263,9 +1284,10 @@ var SernoToToken map[Serno]*SessToken
 
 */
 type LoginPagePars struct {
-	Msg    string
-	Target string
-	Serno  string
+	LoginPath string // path used in POST request for logging in
+	Msg       string // message to user to login
+	Target    string // path to redirect to after successful login
+	Serno     string // serno of receiver this login is for
 }
 
 func RequestLogin(w http.ResponseWriter, pars *LoginPagePars) {
@@ -1276,96 +1298,159 @@ func RequestLogin(w http.ResponseWriter, pars *LoginPagePars) {
 	loginTemplate.Execute(w, *pars)
 }
 
+// generate a random printable token of n characters
+// using ceiling(6n / 8) random bytes
+func MakeToken(n int) string {
+	buf := make([]byte, (6*n+7)/8)
+	if _, err := cryptorand.Read(buf); err != nil {
+		log.Fatal("Unable to get random bits")
+	}
+	return base64.RawStdEncoding.EncodeToString(buf)[:n]
+}
+
 // serve web clients with pages from an ActiveSG, using cookies to
 // protect with credentials, and limiting to one user per SG
 // (The SG web server handles only one connection at a time).
+// Note: all valid requests look like https://SERNO.sensorgnome.org/XXX on the client,
+// and are proxied to this server as http://localhost:59027/SERNO/XXX
+
 func RevProxyHandler(w http.ResponseWriter, r *http.Request) {
+	// extract the serial number from the request
+	var sg *ActiveSG = nil
 	path := r.URL.Path
-	// serno will be "" unless the path starts with a valid serial number
-	var serno Serno = ""
-	if len(path) > 1 && SernoRegexp.MatchString(path[1:]) {
-		serno = Serno(path[1:16])
+	var serno Serno
+	if len(path) > 1 {
+		// path has at least two characters so we can test for a valid serno
+		// this is redundant, in that we're behind nginx which sends us
+		// a "/SERNO" at the start of the path, but it's safeer to bullet-proof
+		// this.
+		serno = Serno(strings.ToUpper(SernoRegexp.FindString(path[1:])))
+		if sgp, ok := activeSGs.Load(serno); ok {
+			sg = sgp.(*ActiveSG)
+		}
 	}
-	// see whether this is a login
-	if path == "/login" && r.Method == "POST" {
+	if sg == nil {
+		http.Error(w, "404 - device not found", http.StatusNotFound)
+		return
+	}
+	// strip the serial number from the request path
+	if len(path) > 1 + len(serno) {
+		path = path[1+len(serno):]
+		r.URL.Path = path // strip the leading /SERNO from the path
+		r.RequestURI = r.RequestURI[1+len(serno):] // strip the leading /SERNO from the requestURI
+	} else {
+		// again, we should never get here, but BSTS
+		path = "/"
+	}
+	// get any user token
+	var token *UserToken = nil
+	if cookie, err := r.Cookie("sgsession"); err == nil {
+		token = StringToToken[cookie.Value]
+	}
+	now := time.Now()
+	if sess := SernoToSess[serno]; sess != nil && sess.Token == token {
+		// Most common case; this request is part of a session
+		// belonging to the user who owns the token.  As long
+		// as the authentication token hasn't expired we proxy
+		// the request to the appropriate SG
+		if sess.Token.Expiry.After(now) {
+			sess.LastReq = now
+			sess.SG.Proxy.RProxy.ServeHTTP(w, r)
+		} else {
+			lpp := LoginPagePars{LoginPath: ProxyLoginPath, Msg: "Session Expired<br>Motus Login Required", Target: r.URL.Path, Serno:string(serno)}
+			sess.SG.lock.Lock()
+			defer sess.SG.lock.Unlock()
+			sess.SG.WebUser = 0
+			delete(SernoToSess, serno)
+			delete(StringToToken, sess.Token.Token)
+			RequestLogin(w, &lpp)
+		}
+		return
+	}
+	// This request is not part of a session, so the goal is to create
+	// a new session.  This requires:
+	//   a) an authenticated user
+	//   b) a valid serno
+	//   c) authorization of that user for that serno
+	//   d) serno is connected
+	//   e) serno is not already in use by another user
+
+	// Check these one at a time:
+
+	// a) if this is a login, see whether it is valid and if so generate a token
+	//    and redirect browser to the login form's target
+	if path == ProxyLoginPath && r.Method == "POST" {
 		// try validate user
 		if r.ParseForm() == nil {
-			serno = Serno(r.Form["serno"][0])
-			user := Auth(serno, "motus,"+r.Form["username"][0]+","+r.Form["password"][0])
+			user := Authenticate([]string{"motus", r.Form["username"][0], r.Form["password"][0]})
 			if user != nil {
-				// user is authorized for this SG, so generate a token,
-				// see whether the SG is still connected
-				sgp, ok := activeSGs.Load(serno)
-				sg := sgp.(*ActiveSG)
-				if !ok || !sg.Connected {
-					// validated request, so forward to SG
-					http.Error(w, "This SG is not connected.", http.StatusNotFound)
-					return
-				}
-				sg.lock.Lock()
-				defer sg.lock.Unlock()
-				// set up a tunnel port to the remote SG via its SSH connection
-				if sg.WebUser != 0 && sg.WebUser != user.UserID {
-					// see if the existing session for this SG has expired
-					oldtoken := SernoToToken[serno]
-					now := time.Now()
-					if oldtoken.Expiry.Before(now) || now.Sub(oldtoken.LastReq) > UserTokenKeepAlive {
-						// delete the previous token
-						delete(SernoToToken, serno)
-						delete(StringToToken, oldtoken.Token)
-						sg.WebUser = 0
-					} else {
-						http.Error(w, "This SG is in use by "+MotusInfo.Users[sg.WebUser].Email+" - try again later", http.StatusServiceUnavailable)
-						return
-					}
-				}
-
-				// set up a UserToken representing this user
+				// set up a UserToken representing this user, good for 1 week
 				token := UserToken{Token: MakeToken(32),
-					Expiry: time.Now().Add(time.Minute * 30),
+					Expiry: time.Now().Add(time.Hour * 24 * 7),
 					UserID: user.UserID}
 				StringToToken[token.Token] = &token
-				// set up an SGSession connecting this user to this SG
-				SernoToSession[serno] = &SGSession{SG:sg, Client:r.Addr(), Token:token}
-				sg.WebUser = user.UserID
 				// add cookie and redirect to the original path
-				// which is stored in the form's "data" item
+				// which is stored in the form's "target" item
 				// This cookie grants the web client access to the session with this SG
-				cookie := http.Cookie{Name: "sgsession", Value: token.Token, Expires: token.Expiry}
+				cookie := http.Cookie{Name: "sgsession", Value: token.Token, Expires: token.Expiry, Domain:".sensorgnome.org"}
 				http.SetCookie(w, &cookie)
 				http.Redirect(w, r, r.Form["target"][0], http.StatusFound)
 				return
 			}
 		}
-		lpp := LoginPagePars{LoginPath: ProxyLoginPath, Msg: "Motus Login failed - try again", Target: r.URL.String(), Serno: string(serno)}
+		// either invalid credentials or broken form submitted
+		lpp := LoginPagePars{LoginPath: ProxyLoginPath, Msg: "Motus Login failed - try again", Target: r.URL.Path, Serno:string(serno)}
 		RequestLogin(w, &lpp)
 		return
 	}
-	cookie, err := r.Cookie("sgsession")
-	if err != nil {
-		lpp := LoginPagePars{LoginPath: ProxyLoginPath, Msg: "Motus Login Required", Target: r.URL.String(), Serno: string(serno)}
+	// a) part 2: must now have a valid token
+	if token == nil {
+		lpp := LoginPagePars{LoginPath: ProxyLoginPath, Msg: "Motus Login Required", Target: r.URL.Path, Serno:string(serno)}
 		RequestLogin(w, &lpp)
 		return
 	}
-	if token, ok := StringToToken[cookie.Value]; !ok || token.Expiry.Before(time.Now()) || (serno != "" && serno != token.SG.Serno) {
-		// clear cookie on client by setting expiry time back many hours from now
-		cookie := http.Cookie{Name: "sgsession", Value: "", Expires: time.Now().Add(-1024 * time.Hour)}
-		http.SetCookie(w, &cookie)
-		lpp := LoginPagePars{LoginPath: ProxyLoginPath, Msg: "Motus Login Required", Target: r.URL.String(), Serno: string(serno)}
-		RequestLogin(w, &lpp)
+
+	// c) user is authorized for serno
+	if !Authorized(token.UserID, serno) {
+		http.Error(w, "401 - not authorized for device", http.StatusUnauthorized)
 		return
-	} else {
-		// validated request, so forward to SG
-		token.LastReq = time.Now()
-		token.ServeHTTP(w, r)
 	}
-	// for errors: http.Error(w, "404 page not found", http.StatusNotFound)
+
+	// d) serno is still connected
+	if !sg.Connected || sg.Proxy == nil || sg.Proxy.RProxy == nil {
+		http.Error(w, "504 - device not connected", http.StatusGatewayTimeout)
+		return
+	}
+
+	// e) serno is not in use by another user
+	if sg.WebUser != 0 && sg.WebUser != token.UserID {
+		// in use by other user - see if their session or token has expired;
+		// an expired token forces the session to expire
+		if oSess := SernoToSess[serno]; oSess != nil {
+			if oSess.Token.Expiry.Before(now) || now.Sub(oSess.LastReq) > SessionKeepAlive {
+				// delete the other user's expired session
+				delete(SernoToSess, serno)
+			} else {
+				http.Error(w, "This SG is in use by "+MotusInfo.Users[sg.WebUser].Email+" - try again later", http.StatusServiceUnavailable)
+				return
+			}
+		}
+		// no valid and un-expired session found for this SG after all
+	}
+	// create a session for this user to this device
+	sg.lock.Lock()
+	sg.WebUser = token.UserID
+	sg.lock.Unlock()
+	// set up an SGSession connecting this user to this SG
+	sess := SGSession{SG: sg, Token: token, LastReq:now}
+	SernoToSess[serno] = &sess
+	sg.Proxy.RProxy.ServeHTTP(w, r)
 }
 
 // server to connect web clients with credentials to SG web servers
 func MasterRevProxy(ctx context.Context, addr string) {
-	StringToToken = make(map[string]*SessToken)
-	SernoToToken = make(map[Serno]*SessToken)
+	StringToToken = make(map[string]*UserToken)
+	SernoToSess = make(map[Serno]*SGSession)
 	srv := http.Server{Addr: addr, Handler: http.HandlerFunc(RevProxyHandler)}
 	srv.ListenAndServe()
 	defer srv.Shutdown(nil)
@@ -1462,9 +1547,7 @@ func main() {
 
 	// messageDump() // DEBUG
 
-	// maintain an up-to-date status page, but don't update more than
-	// once every 5 seconds and don't wait longer than that to update
-	// when needed.
+	// maintain an up-to-date status page
 	StatusPageMaintainer(StatusPagePath, StatusPageMinLatency*time.Second)
 
 	//
