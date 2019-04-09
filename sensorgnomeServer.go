@@ -51,6 +51,7 @@ const (
 	MotusSyncTemplate     = "/sgm_local/sync/method=%d,serno=%s"                                               // template for file touched on sgdata.motus.org to cause sync; %d=port, %s=serno
 	MotusSSHUserKey       = "/home/sg_remote/.ssh/id_ed25519_sgorg_sgdata"                                     // ssh key to use for sync on sgdata.motus.org
 	MotusSSHUser          = "sg@sgdata.motus.org"                                                              // user on sgdata.motus.org; this is who ssh makes us be
+	ProxyLoginPath        = "/sgsrvlogin"                                                                      // path to login to direct.sensorgnome.org; must not be a valid path for an SG's own webserver
 	SernoRE               = "SG-[0-9A-Za-z]{12}"                                                               // regular expression matching SG serial number
 	SessTokenKeepAlive    = time.Minute * 2                                                                    // how long before an unused direct connection to an SG can be bumped by another user
 	SGDBFile              = "/home/sg_remote/sg_remote.sqlite"                                                 // sqlite database with receiver info
@@ -1200,7 +1201,7 @@ var loginTemplateString string = `<html>
   <body>
     <div class="container">
       <h1>{{.Msg}}</h1>
-      <form action="/login" method="POST">
+      <form action="{{.LoginPath}}" method="POST">
 	<input type="text" placeholder="username" class="field" name="username">
 	<input type="password" placeholder="password" class="field" name="password">
 	<input type="hidden" name="target" value="{{.Target}}">
@@ -1308,7 +1309,7 @@ func RevProxyHandler(w http.ResponseWriter, r *http.Request) {
 					// see if the existing session for this SG has expired
 					oldtoken := SernoToToken[serno]
 					now := time.Now()
-					if oldtoken.Expiry.Before(now) || now.Sub(oldtoken.LastReq) > SessTokenKeepAlive {
+					if oldtoken.Expiry.Before(now) || now.Sub(oldtoken.LastReq) > UserTokenKeepAlive {
 						// delete the previous token
 						delete(SernoToToken, serno)
 						delete(StringToToken, oldtoken.Token)
@@ -1319,13 +1320,13 @@ func RevProxyHandler(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 
-				// set up a session token representing the connection to this SG
-				token := SessToken{Token: MakeToken(32),
+				// set up a UserToken representing this user
+				token := UserToken{Token: MakeToken(32),
 					Expiry: time.Now().Add(time.Minute * 30),
-					UserID: user.UserID,
-					SG:     sg}
+					UserID: user.UserID}
 				StringToToken[token.Token] = &token
-				SernoToToken[serno] = &token
+				// set up an SGSession connecting this user to this SG
+				SernoToSession[serno] = &SGSession{SG:sg, Client:r.Addr(), Token:token}
 				sg.WebUser = user.UserID
 				// add cookie and redirect to the original path
 				// which is stored in the form's "data" item
@@ -1336,13 +1337,13 @@ func RevProxyHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		lpp := LoginPagePars{Msg: "Motus Login failed - try again", Target: r.URL.String(), Serno: string(serno)}
+		lpp := LoginPagePars{LoginPath: ProxyLoginPath, Msg: "Motus Login failed - try again", Target: r.URL.String(), Serno: string(serno)}
 		RequestLogin(w, &lpp)
 		return
 	}
 	cookie, err := r.Cookie("sgsession")
 	if err != nil {
-		lpp := LoginPagePars{Msg: "Motus Login Required", Target: r.URL.String(), Serno: string(serno)}
+		lpp := LoginPagePars{LoginPath: ProxyLoginPath, Msg: "Motus Login Required", Target: r.URL.String(), Serno: string(serno)}
 		RequestLogin(w, &lpp)
 		return
 	}
@@ -1350,13 +1351,13 @@ func RevProxyHandler(w http.ResponseWriter, r *http.Request) {
 		// clear cookie on client by setting expiry time back many hours from now
 		cookie := http.Cookie{Name: "sgsession", Value: "", Expires: time.Now().Add(-1024 * time.Hour)}
 		http.SetCookie(w, &cookie)
-		lpp := LoginPagePars{Msg: "Motus Login Required", Target: r.URL.String(), Serno: string(serno)}
+		lpp := LoginPagePars{LoginPath: ProxyLoginPath, Msg: "Motus Login Required", Target: r.URL.String(), Serno: string(serno)}
 		RequestLogin(w, &lpp)
 		return
 	} else {
 		// validated request, so forward to SG
 		token.LastReq = time.Now()
-		token.SG.Proxy.RProxy.ServeHTTP(w, r)
+		token.ServeHTTP(w, r)
 	}
 	// for errors: http.Error(w, "404 page not found", http.StatusNotFound)
 }
