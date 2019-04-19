@@ -116,15 +116,16 @@ var SernoRegexp = regexp.MustCompile(SernoRE)
 
 // an SG we have seen recently
 type ActiveSG struct {
-	Serno      Serno     // serial number; e.g. "SG-1234BBBK9812"
-	TsConn     time.Time // time at which connected
-	TsDisConn  time.Time // time at which last disconnected
-	TsLastSync time.Time // time at which last synced with motus
-	TsNextSync time.Time // time at which next to be synced with motus
-	TunnelPort int       // ssh tunnel port, if applicable
-	WebUser    int       // if non-zero, ID of the user directly connected to the SG's web server
-	Proxy      *Proxy    // if non-nil, reverse proxy to the SG's web server
-	Connected  bool      // actually connected?  once we've seen a receiver, we keep this struct in memory,
+	Serno      Serno                  // serial number; e.g. "SG-1234BBBK9812"
+	TsConn     time.Time              // time at which connected
+	TsDisConn  time.Time              // time at which last disconnected
+	TsLastSync time.Time              // time at which last synced with motus
+	TsNextSync time.Time              // time at which next to be synced with motus
+	TunnelPort int                    // ssh tunnel port, if applicable
+	WebPort    int                    // web server port mapped on server back to SG's web server
+	WebUser    int                    // if non-zero, ID of the user directly connected to the SG's web server
+	Proxy      *httputil.ReverseProxy // if non-nil, reverse proxy to the SG's web server
+	Connected  bool                   // actually connected?  once we've seen a receiver, we keep this struct in memory,
 	// but set this field to false when it disconnects
 	lock sync.Mutex // lock for any read or write access to fields in this struct
 }
@@ -397,6 +398,7 @@ func (sg *ActiveSG) FromDB() *ActiveSG {
 		sg.lock.Lock()
 		defer sg.lock.Unlock()
 		sg.TunnelPort = t
+		sg.WebPort = webPortFromTunnelPort(t) + 10000
 		sg.TsLastSync = time.Unix(0, int64(ts*1E9))
 	}
 	return sg
@@ -491,7 +493,7 @@ func SGMinder() {
 			case MsgSGConnect:
 				sg.TsConn = m.ts
 				sg.Connected = true
-				go InitProxy(sg)
+				InitProxy(sg)
 			case MsgSGDisconnect:
 				sg.TsDisConn = m.ts
 				sg.Connected = false
@@ -943,6 +945,13 @@ Done:
 	conn.Close()
 }
 
+// obtain the webPort for a given tunnelport
+func webPortFromTunnelPort(tp int) int {
+	// on the server, we reserve tp + 10000 for the local port mapped
+	// back to the SG's web server
+	return tp + 10000
+}
+
 // create a new registration for an SG into the existing struct
 //
 // return Error on failure, nil on success
@@ -1008,8 +1017,8 @@ func RegisterSG(serno Serno, reg *Registration) error {
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(f, `command="/bin/false",no-pty,no-X11-forwarding,single-remote-forwarding-port=%d,permitopen="localhost:%s",permitopen="localhost:7",environment="SG_SERNO=%s",environment="SG_PORT=%d",connection-semname="%s" %s`,
-		reg.tunnelPort, TrustedStreamPort, string(serno), reg.tunnelPort, string(serno), pubkey)
+	_, err = fmt.Fprintf(f, `command="/bin/false",no-pty,no-X11-forwarding,permitlisten="localhost:%d",permitlisten="localhost:%d",permitopen="localhost:%s",permitopen="localhost:7",environment="SG_SERNO=%s",environment="SG_PORT=%d",connection-semname="%s" %s`,
+		reg.tunnelPort, webPortFromTunnelPort(reg.tunnelPort), TrustedStreamPort, string(serno), reg.tunnelPort, string(serno), pubkey)
 	f.Close()
 	return err
 }
@@ -1364,7 +1373,7 @@ func RevProxyHandler(w http.ResponseWriter, r *http.Request) {
 		// the request to the appropriate SG
 		if sess.Token.Expiry.After(now) {
 			sess.LastReq = now
-			sess.SG.Proxy.RProxy.ServeHTTP(w, r)
+			sess.SG.Proxy.ServeHTTP(w, r)
 		} else {
 			lpp := LoginPagePars{LoginPath: ProxyLoginPath, Msg: "Session Expired<br>Motus Login Required", Target: r.URL.Path, Serno:string(serno)}
 			sess.SG.lock.Lock()
@@ -1426,7 +1435,7 @@ func RevProxyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// d) serno is still connected
-	if !sg.Connected || sg.Proxy == nil || sg.Proxy.RProxy == nil {
+	if !sg.Connected || sg.Proxy == nil {
 		http.Error(w, "504 - device not connected", http.StatusGatewayTimeout)
 		return
 	}
@@ -1453,7 +1462,7 @@ func RevProxyHandler(w http.ResponseWriter, r *http.Request) {
 	// set up an SGSession connecting this user to this SG
 	sess := SGSession{SG: sg, Token: token, LastReq:now}
 	SernoToSess[serno] = &sess
-	sg.Proxy.RProxy.ServeHTTP(w, r)
+	sg.Proxy.ServeHTTP(w, r)
 }
 
 // server to connect web clients with credentials to SG web servers
@@ -1466,56 +1475,16 @@ func MasterRevProxy(ctx context.Context, addr string) {
 	<-ctx.Done()
 }
 
-type Proxy struct {
-	WebMapProc *os.Process            // ssh process maintaining the tunnel portmap to the SG's port 80
-	WebPort    int                    // the local port mapped via ssh tunnel to the SG's port 80
-	RProxy     *httputil.ReverseProxy // reverse proxy server to remote SG's web server
-}
-
-// goroutine to set-up a reverse web proxy for this SG
-// this goroutine exists when the SG disconnects
+// set-up a reverse web proxy for this SG; the caller must have locked
+// the SG.  This proxy persists across possible SG disconnect/reconnects,
+// as it only relays requests to a server port.  If the SG is connected,
+// it will have mapped that port back to its own webserver port over ssh.
 func InitProxy(sg *ActiveSG) {
 	if sg.Proxy != nil {
-		sg.Proxy.WebMapProc.Kill()
-		sg.lock.Lock()
-		sg.Proxy = nil
-		sg.lock.Unlock()
+		return
 	}
-	webport := sg.TunnelPort + 10000
-	px := &Proxy{WebPort: webport}
-	// On some beaglebone SGs, the web server listens only on the USB network interface.
-	// On other beaglebone SGs and all Pi SGs, the web server will be available on
-	// (at least) the loopback interface.
-	var iface string
-	if sg.Serno[7:9] == "BB" { // e.g. "SG-1234BBBK5678"
-		iface = "192.168.7.2"
-	} else {
-		iface = "localhost"
-	}
-	cmd := exec.Command("sshpass", "-p", SGPassword, "ssh", "-p", strconv.Itoa(sg.TunnelPort), "-N",
-		"-oStrictHostKeyChecking=no", "-oExitOnForwardFailure=yes", fmt.Sprintf("-L%d:%s:80", webport, iface), SGUser+"@localhost")
-	for {
-		if !sg.Connected {
-			return
-		}
-		if err := cmd.Start(); err == nil {
-			break
-		}
-		// some ugly logic to check on forwarding success
-		// wait for 3 seconds to see whether port mapping succeeds
-		time.Sleep(3 * time.Second)
-		if !cmd.ProcessState.Exited() {
-			break
-		}
-		// wait a bit before retrying; we might have won a race with
-		// the SG's mapping of its tunnelPort
-		time.Sleep(10 * time.Second)
-	}
-	px.WebPort = webport
-	px.WebMapProc = cmd.Process
-	// set up a reverse proxy to the SG's web server
-	sgurl, _ := url.Parse("http://localhost:" + strconv.Itoa(webport))
-	px.RProxy = &httputil.ReverseProxy{
+	sgurl, _ := url.Parse("http://localhost:" + strconv.Itoa(sg.WebPort))
+	px := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = sgurl.Scheme
 			req.URL.Host = sgurl.Host
@@ -1524,9 +1493,7 @@ func InitProxy(sg *ActiveSG) {
 			}
 		},
 	}
-	sg.lock.Lock()
 	sg.Proxy = px
-	sg.lock.Unlock()
 }
 
 func main() {
