@@ -1531,13 +1531,35 @@ func main() {
 	// Producers are launched after consumers have subscribed
 	// to message topics.
 
+	// generate SG connect/disconnect events based on semaphores
+	// created by sshd
 	ConnectionWatcher(ctx, ConnectionSemPath, ConnectionSemRE)
-	go StatusServer(ctx, AddressStatusServer)
+
+	// accept SG message streams from trusted sources
 	go TrustedStreamSource(ctx, AddressTrustedStream)
+
+	// accept SG message datagrams from untrusted sources
+	// (these must be signed)
 	go DgramSource(ctx, AddressUntrustedDgram, false)
+
+	// accept SG message datagrams from trusted sources
 	go DgramSource(ctx, AddressTrustedDgram, true)
+
+	// handle SG (re-)registrations
 	go RegistrationServer(ctx, AddressRegServer)
+
+	//
+	//         non-Message servers
+	//
+	// These don't use the message bus, but might rely on infrastructure
+	// created by message consumers or producers.
+
+	// reply to requests for receiver status
+	go StatusServer(ctx, AddressStatusServer)
+
+	// handle HTTP requests sent to sg-xxxxxxxxxxxx.sensorgnome.org
 	go MasterRevProxy(ctx, AddressRevProxy)
+
 	// wait until cancelled (nothing does this, though)
 	<-ctx.Done()
 }
