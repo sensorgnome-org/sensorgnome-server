@@ -122,7 +122,7 @@ type ActiveSG struct {
 	TunnelPort int                    // ssh tunnel port, if applicable
 	WebPort    int                    // web server port mapped on server back to SG's web server
 	WebUser    int                    // if non-zero, ID of the user directly connected to the SG's web server
-	Proxy      *httputil.ReverseProxy // if non-nil, reverse proxy to the SG's web server
+	Proxy      *httputil.ReverseProxy `json:"-"` // if non-nil, reverse proxy to the SG's web server; don't export to json
 	Connected  bool                   // actually connected?  once we've seen a receiver, we keep this struct in memory,
 	// but set this field to false when it disconnects
 	lock sync.Mutex // lock for any read or write access to fields in this struct
