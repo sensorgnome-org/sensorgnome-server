@@ -295,6 +295,9 @@ func unixtime(ts time.Time) float64 {
 // Goroutine that records (some) messages to a
 // table called "messages" in the global DB.
 func DBRecorder() {
+	// database pointer
+	DB := OpenDB(SGDBFile)
+
 	stmt, err := DB.Prepare("INSERT INTO messages (ts, sender, message) VALUES (?, ?, ?)")
 	if err != nil {
 		log.Fatal(err)
@@ -608,9 +611,6 @@ func SyncManager() {
 		}
 	}()
 }
-
-// global database pointer
-var DB *sql.DB
 
 // enum type for prepared queries
 type dbQuery int
@@ -1500,7 +1500,6 @@ func main() {
 	rand.Seed(time.Now().UnixNano())
 	Bus = mbus.NewMbus()
 	var ctx, _ = context.WithCancel(context.Background())
-	DB = OpenDB(SGDBFile)
 
 	//
 	//         Message Consumers
