@@ -399,7 +399,7 @@ func (sg *ActiveSG) FromDB() *ActiveSG {
 		sg.lock.Lock()
 		defer sg.lock.Unlock()
 		sg.TunnelPort = t
-		sg.WebPort = webPortFromTunnelPort(t) + 10000
+		sg.WebPort = webPortFromTunnelPort(t)
 		sg.TsLastSync = time.Unix(0, int64(ts*1E9))
 	}
 	return sg
