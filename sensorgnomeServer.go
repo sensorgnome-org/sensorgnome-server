@@ -367,11 +367,20 @@ func SQL(q dbQuery, pars []interface{}, res []interface{}) (rv bool) {
 //
 // 'c' for combine, as in R; the point is to effectively allow multiple
 // variadic arguments for a single function; e.g. f(c(a1,a2,a3),c(b1,b2,b3,b4))
+//
+// an alternative is to define a type `c` as `type c []interface{}`
+// and then use `c{a1,a2,a3}` instead of `c(a1,a2,a3)`.  This
+// generates almost identical assembler code, except that the function
+// approach leads to a spurious `XCHGL AX, AX` for each call to `c`.
+// func c(v ...interface{}) []interface{} {
+// 	// trivial implementation, courtesy of `...` semantics
+// 	return v
+// }
+//
+// So we use the `type` approach, whose syntax also makes it more clear
+// we are passing slice literals.
 
-func c(v ...interface{}) []interface{} {
-	// trivial implementation, courtesy of `...` semantics
-	return v
-}
+type c []interface{}
 
 // update an ActiveSG record from the global database DB
 //
@@ -383,8 +392,8 @@ func (sg *ActiveSG) FromDB() *ActiveSG {
 		t  int
 		ts float64
 	)
-	if SQL(DBQGetTunnelPort, c(sg.Serno), c(&t)) &&
-		SQL(DBQGetTsLastSync, c(sg.Serno), c(&ts)) {
+	if SQL(DBQGetTunnelPort, c{sg.Serno}, c{&t}) &&
+		SQL(DBQGetTsLastSync, c{sg.Serno}, c{&ts}) {
 		sg.lock.Lock()
 		defer sg.lock.Unlock()
 		sg.TunnelPort = t
@@ -916,7 +925,7 @@ func handleRegConn(conn net.Conn) {
 		trusted := TrustedIPAddrRegexp.MatchString(conn.RemoteAddr().String())
 		// has this SG been seen before?
 		var reg Registration
-		known := SQL(DBQGetRegistration, c(serno), c(&reg.tunnelPort, &reg.pubKey, &reg.privKey))
+		known := SQL(DBQGetRegistration, c{serno}, c{&reg.tunnelPort, &reg.pubKey, &reg.privKey})
 		if !known {
 			if err = RegisterSG(Serno(serno), &reg); err != nil {
 				log.Printf("Unable to register new receiver %s: %s", string(serno), err.Error())
@@ -938,14 +947,14 @@ Done:
 //
 // return Error on failure, nil on success
 func RegisterSG(serno Serno, reg *Registration) error {
-	ok := SQL(DBQNewSG, c(string(serno)), c())
+	ok := SQL(DBQNewSG, c{string(serno)}, c{})
 	if !ok {
 		// unable to create new SG record (!) out of tunnel ports?  Obvious DOS attack vector here!
 		return fmt.Errorf("unable to register new SG: %s", serno)
 	}
 	reg.serno = serno
 	// read back the tunnelPort just generated
-	if !SQL(DBQGetRegistration, c(serno), c(&reg.tunnelPort, &reg.pubKey, &reg.privKey)) {
+	if !SQL(DBQGetRegistration, c{serno}, c{&reg.tunnelPort, &reg.pubKey, &reg.privKey}) {
 		return fmt.Errorf("unable to read registration record for %s", serno)
 	}
 
@@ -981,7 +990,7 @@ func RegisterSG(serno Serno, reg *Registration) error {
 		return err
 	}
 
-	if !SQL(DBQNewSGKeys, c(unixtime(time.Now()), pubkey, privkey, true, string(serno)), c()) {
+	if !SQL(DBQNewSGKeys, c{unixtime(time.Now()), pubkey, privkey, true, string(serno)}, c{}) {
 		return fmt.Errorf("Unable to record crypto keys for %s", serno)
 	}
 	reg.pubKey = string(pubkey)
