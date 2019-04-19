@@ -1,7 +1,6 @@
 package main
 
 import (
-	//	"bytes"
 	"context"
 	cryptorand "crypto/rand"
 	"database/sql"
@@ -21,7 +20,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
-	//	"os"
 	"os/exec"
 	"path"
 	"regexp"
@@ -54,7 +52,7 @@ const (
 	MotusSSHUserKey       = "/home/sg_remote/.ssh/id_ed25519_sgorg_sgdata"                                     // ssh key to use for sync on sgdata.motus.org
 	MotusSSHUser          = "sg@sgdata.motus.org"                                                              // user on sgdata.motus.org; this is who ssh makes us be
 	ProxyLoginPath        = "/sgsrvlogin"                                                                      // path to login to direct.sensorgnome.org; must not be a valid path for an SG's own webserver
-	SernoBareRE           = "(?i)SG-[0-9A-Za-z]{12}(_[0-9])?"                                                      // regular expression matching SG serial number anywhere
+	SernoBareRE           = "(?i)SG-[0-9A-Za-z]{12}(_[0-9])?"                                                  // regular expression matching SG serial number anywhere
 	SernoRE               = "^" + SernoBareRE                                                                  // regular expression matching SG serial number at start of target
 	SessionKeepAlive      = time.Minute * 1                                                                    // how long before an unused direct connection to an SG can be bumped by another user
 	SGDBFile              = "/home/sg_remote/sg_remote.sqlite"                                                 // sqlite database with receiver info
@@ -1352,9 +1350,9 @@ func RevProxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// strip the serial number from the request path
-	if len(path) > 1 + len(serno) {
+	if len(path) > 1+len(serno) {
 		path = path[1+len(serno):]
-		r.URL.Path = path // strip the leading /SERNO from the path
+		r.URL.Path = path                          // strip the leading /SERNO from the path
 		r.RequestURI = r.RequestURI[1+len(serno):] // strip the leading /SERNO from the requestURI
 	} else {
 		// again, we should never get here, but BSTS
@@ -1375,7 +1373,7 @@ func RevProxyHandler(w http.ResponseWriter, r *http.Request) {
 			sess.LastReq = now
 			sess.SG.Proxy.ServeHTTP(w, r)
 		} else {
-			lpp := LoginPagePars{LoginPath: ProxyLoginPath, Msg: "Session Expired<br>Motus Login Required", Target: r.URL.Path, Serno:string(serno)}
+			lpp := LoginPagePars{LoginPath: ProxyLoginPath, Msg: "Session Expired<br>Motus Login Required", Target: r.URL.Path, Serno: string(serno)}
 			sess.SG.lock.Lock()
 			defer sess.SG.lock.Unlock()
 			sess.SG.WebUser = 0
@@ -1410,20 +1408,20 @@ func RevProxyHandler(w http.ResponseWriter, r *http.Request) {
 				// add cookie and redirect to the original path
 				// which is stored in the form's "target" item
 				// This cookie grants the web client access to the session with this SG
-				cookie := http.Cookie{Name: "sgsession", Value: token.Token, Expires: token.Expiry, Domain:".sensorgnome.org"}
+				cookie := http.Cookie{Name: "sgsession", Value: token.Token, Expires: token.Expiry, Domain: ".sensorgnome.org"}
 				http.SetCookie(w, &cookie)
 				http.Redirect(w, r, r.Form["target"][0], http.StatusFound)
 				return
 			}
 		}
 		// either invalid credentials or broken form submitted
-		lpp := LoginPagePars{LoginPath: ProxyLoginPath, Msg: "Motus Login failed - try again", Target: r.URL.Path, Serno:string(serno)}
+		lpp := LoginPagePars{LoginPath: ProxyLoginPath, Msg: "Motus Login failed - try again", Target: r.URL.Path, Serno: string(serno)}
 		RequestLogin(w, &lpp)
 		return
 	}
 	// a) part 2: must now have a valid token
 	if token == nil {
-		lpp := LoginPagePars{LoginPath: ProxyLoginPath, Msg: "Motus Login Required", Target: r.URL.Path, Serno:string(serno)}
+		lpp := LoginPagePars{LoginPath: ProxyLoginPath, Msg: "Motus Login Required", Target: r.URL.Path, Serno: string(serno)}
 		RequestLogin(w, &lpp)
 		return
 	}
@@ -1460,7 +1458,7 @@ func RevProxyHandler(w http.ResponseWriter, r *http.Request) {
 	sg.WebUser = token.UserID
 	sg.lock.Unlock()
 	// set up an SGSession connecting this user to this SG
-	sess := SGSession{SG: sg, Token: token, LastReq:now}
+	sess := SGSession{SG: sg, Token: token, LastReq: now}
 	SernoToSess[serno] = &sess
 	sg.Proxy.ServeHTTP(w, r)
 }
