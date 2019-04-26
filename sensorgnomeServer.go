@@ -60,7 +60,7 @@ const (
 	SGPassword            = "bone"                                                                             // password for logging into remote SG
 	ShortTimestampFormat  = "Jan _2 15:04"                                                                     // timestamp format for sync times etc. on status page
 	StatusPageMinLatency  = 5                                                                                  // minimum latency (seconds) between status page updates
-	StatusPagePath        = "/home/johnb/src/sensorgnome-server/website/content/status/index.md"               // path to generated page (needs group write permission and ownership by sg_remote group)
+	StatusPagePath        = "/home/johnb/src/sensorgnome-website/content/status/index.md"                      // path to generated page (needs group write permission and ownership by sg_remote group)
 	SyncTimeDir           = "/home/sg_remote/last_sync"                                                        // directory with one file per SG; mtime is last sync time
 	SyncWaitHi            = 90                                                                                 // maximum time between syncs of a receiver (minutes)
 	SyncWaitLo            = 30                                                                                 // minimum time between syncs of a receiver (minutes)
