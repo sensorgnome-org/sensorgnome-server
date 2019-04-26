@@ -1106,19 +1106,23 @@ func MakeStatusPage(path string) {
 		"\n:------------------:|--------------|:--------:|-----------------|-------------------|-------------------")
 
 	var lines []string
-	activeSGs.Range(func(serno interface{}, sgp interface{}) bool {
+	activeSGs.Range(func(sno interface{}, sgp interface{}) bool {
+		serno := sno.(Serno)
 		sg := sgp.(*ActiveSG)
-		rdep := MotusInfo.RecvDeps[serno.(Serno)]
+		rdep := MotusInfo.RecvDeps[serno]
 		var status string
 		var tcon time.Time
+		var liveLink string
 		if sg.Connected {
 			status = "Yes"
 			tcon = sg.TsConn
+			liveLink = fmt.Sprintf(`<a href="https://%s.sensorgnome.org">%s</a>`, serno, serno)
 		} else {
-			status = "No"
+			status = "<b>No</b>"
 			tcon = sg.TsDisConn
+			liveLink = string(serno)
 		}
-		line := fmt.Sprintf(`<a href="https://%s.sensorgnome.org">%s</a> (%d)|%s (%s)|%s|%s|<a href="https://sgdata.motus.org/status?jobsForSerno=%s&excludeSync=0" target="_blank">%s</a>|%s`, serno.(Serno), serno.(Serno), sg.TunnelPort, rdep.SiteName, MotusInfo.Projects[rdep.ProjectID], status, mkTime(tcon), serno.(Serno), mkTime(sg.TsLastSync), mkTime(sg.TsNextSync))
+		line := fmt.Sprintf(`%s (%d)|%s (%s)|%s|%s|<a href="https://sgdata.motus.org/status?jobsForSerno=%s&excludeSync=0" target="_blank">%s</a>|%s`, liveLink, sg.TunnelPort, rdep.SiteName, MotusInfo.Projects[rdep.ProjectID], status, mkTime(tcon), serno, mkTime(sg.TsLastSync), mkTime(sg.TsNextSync))
 		lines = append(lines, line)
 		return true
 	})
