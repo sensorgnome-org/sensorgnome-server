@@ -836,7 +836,7 @@ func Authenticate(creds []string) *MotusUser {
 			return nil
 		}
 		// authentication succeeded; record user and attributes
-		muser := &MotusUser{UserID: auth.UserID, Email: auth.EmailAddress, ProjectIDs: make(map[int]bool)}
+		muser := &MotusUser{UserID: auth.UserID, Email: auth.EmailAddress, ProjectIDs: make(map[int]bool), IsAdmin: auth.UserType=="administrator"}
 		i := 0
 		for pid, _ := range auth.Projects {
 			n, _ := strconv.Atoi(pid)
@@ -858,7 +858,7 @@ func Authorized(userID int, serno Serno) bool {
 	// user is authorized if SG is deployed by a motus project to which the
 	// user belongs.
 	user := MotusInfo.Users[userID]
-	if dep, known := MotusInfo.RecvDeps[serno]; known && user != nil && user.ProjectIDs[dep.ProjectID] {
+	if dep, known := MotusInfo.RecvDeps[serno]; user != nil && (user.IsAdmin || (known && user.ProjectIDs[dep.ProjectID])) {
 		return true
 	}
 	return false
@@ -1137,6 +1137,7 @@ type MotusUser struct {
 	UserID     int
 	Email      string
 	ProjectIDs map[int]bool // which projectIDs the user belongs to
+	IsAdmin    bool // can look at any receiver
 }
 
 type MotusCache struct {
@@ -1171,6 +1172,7 @@ type APIResAuth struct {
 	UserID       int
 	EmailAddress string
 	Projects     map[string]string
+	UserType     string // we only care about whether this is "administrator"
 	ErrorCode    string // returned when login fails
 }
 
