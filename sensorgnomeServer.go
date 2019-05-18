@@ -64,7 +64,7 @@ const (
 	SyncTimeDir           = "/home/sg_remote/last_sync"                                                        // directory with one file per SG; mtime is last sync time
 	SyncWaitHi            = 90                                                                                 // maximum time between syncs of a receiver (minutes)
 	SyncWaitLo            = 30                                                                                 // minimum time between syncs of a receiver (minutes)
-	TrustedIPAddrRE       = `209\.183\.24\.36:[0-9]+`                                                          // hard-wired trusted network address for registration
+	TrustedIPAddrRE       = `^209\.183\.24\.36:[0-9]+$`                                                        // hard-wired trusted network address for registration; public IP address of compudata.ca test bench
 	TunnelPortMax         = 49999                                                                              // maximum SG tunnel port we assign
 	TunnelPortMin         = 40000                                                                              // minimum SG tunnel port we assign
 )
