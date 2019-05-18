@@ -52,7 +52,7 @@ const (
 	MotusSSHUserKey       = "/home/sg_remote/.ssh/id_ed25519_sgorg_sgdata"                                     // ssh key to use for sync on sgdata.motus.org
 	MotusSSHUser          = "sg@sgdata.motus.org"                                                              // user on sgdata.motus.org; this is who ssh makes us be
 	ProxyLoginPath        = "/sgsrvlogin"                                                                      // path to login to direct.sensorgnome.org; must not be a valid path for an SG's own webserver
-	SernoBareRE           = "(?i)SG-[0-9A-Za-z]{12}(_[0-9])?"                                                  // regular expression matching SG serial number anywhere
+	SernoBareRE           = "(?i)(SG-)?[0-9A-Za-z]{12}(_[0-9])?"                                                  // regular expression matching SG serial number anywhere
 	SernoRE               = "^" + SernoBareRE                                                                  // regular expression matching SG serial number at start of target
 	SessionKeepAlive      = time.Minute * 1                                                                    // how long before an unused direct connection to an SG can be bumped by another user
 	SGDBFile              = "/home/sg_remote/sg_remote.sqlite"                                                 // sqlite database with receiver info
@@ -920,6 +920,9 @@ func handleRegConn(conn net.Conn) {
 		if serno == "" {
 			// invalid serno
 			goto Done
+		}
+		if serno[0:2] != "SG-" {
+			serno = "SG-" + serno;
 		}
 		// is this connection from a trusted IP address?
 		trusted := TrustedIPAddrRegexp.MatchString(conn.RemoteAddr().String())
