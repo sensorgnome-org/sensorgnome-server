@@ -1019,7 +1019,7 @@ func RegisterSG(serno Serno, reg *Registration) error {
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(f, `command="/bin/false",no-pty,no-X11-forwarding,permitlisten="localhost:%d",permitlisten="localhost:%d",permitopen="localhost:%s",permitopen="localhost:7",environment="SG_SERNO=%s",environment="SG_PORT=%d",connection-semname="%s" %s`,
+	_, err = fmt.Fprintf(f, `command="/bin/true",no-pty,no-X11-forwarding,permitlisten="localhost:%d",permitlisten="localhost:%d",permitopen="localhost:%s",environment="SG_SERNO=%s",environment="SG_PORT=%d",connection-semname="%s" %s`,
 		reg.tunnelPort, webPortFromTunnelPort(reg.tunnelPort), TrustedStreamPort, string(serno), reg.tunnelPort, string(serno), pubkey)
 	f.Close()
 	return err
