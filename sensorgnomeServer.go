@@ -925,7 +925,12 @@ func handleRegConn(conn net.Conn) {
 			serno = "SG-" + serno;
 		}
 		// is this connection from a trusted IP address?
-		trusted := TrustedIPAddrRegexp.MatchString(conn.RemoteAddr().String())
+		// <JMB 2019-05-17>
+		//   trusted := TrustedIPAddrRegexp.MatchString(conn.RemoteAddr().String())
+		// // temporarily make *all* registrations succeed
+		trusted := true
+		// </JMB 2019-05-17>
+
 		// has this SG been seen before?
 		var reg Registration
 		known := SQL(DBQGetRegistration, c{serno}, c{&reg.tunnelPort, &reg.pubKey, &reg.privKey})
