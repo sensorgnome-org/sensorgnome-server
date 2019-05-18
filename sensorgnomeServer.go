@@ -943,6 +943,7 @@ func handleRegConn(conn net.Conn) {
 		_, err = io.WriteString(conn, fmt.Sprintf("%d\n%s%s", reg.tunnelPort, reg.pubKey, reg.privKey))
 	}
 Done:
+	log.Printf("Attempt to register bad serno: %s\n", buff)
 	conn.Close()
 }
 
