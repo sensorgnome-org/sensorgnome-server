@@ -89,3 +89,5 @@ Finally, restart the web server to deploy the renewed certificates:
 ```bash
 # systemctl restart nginx
 ```
+
+It might of course be easier to purchase commercial SSL certs.
