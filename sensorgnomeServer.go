@@ -58,7 +58,7 @@ const (
 	SGDBFile              = "/home/sg_remote/sg_remote.sqlite"                                                 // sqlite database with receiver info
 	SGUser                = "bone"                                                                             // username for logging into remote SG; trivial, but remote SG only allows login via ssh from its local domain
 	SGPassword            = "bone"                                                                             // password for logging into remote SG
-	ShortTimestampFormat  = "Jan _2 15:04"                                                                     // timestamp format for sync times etc. on status page
+	ShortTimestampFormat  = "Jan 2 '06 15:04"                                                                     // timestamp format for sync times etc. on status page
 	StatusPageMinLatency  = 60                                                                                  // minimum latency (seconds) between status page updates
 	StatusPagePath        = "/home/johnb/src/sensorgnome-website/content/status/index.md"                      // path to generated page (needs group write permission and ownership by sg_remote group)
 	SyncTimeDir           = "/home/sg_remote/last_sync"                                                        // directory with one file per SG; mtime is last sync time
