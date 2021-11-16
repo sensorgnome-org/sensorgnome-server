@@ -36,37 +36,37 @@ const (
 	AddressStatusServer   = "localhost:59025" // TCP interface:port on which status requests are answered
 	AddressTrustedDgram   = ":59023"          // UDP interface:port on which we receive unsigned messages from trusted sources (e.g. localhost)
 	TrustedStreamPort     = "59024"
-	AddressTrustedStream  = "localhost:" + TrustedStreamPort                                                   // TCP interface:port on which we receive messages from trusted sources (e.g. SGs connected via ssh)
-	AddressUntrustedDgram = ":59022"                                                                           // UDP interface:port on which we receive messages from untrusted sources
-	AddressRevProxy       = "localhost:59027"                                                                  // TCP interface:port for direct connections to SG web servers
-	ConnectionSemPath     = "/dev/shm"                                                                         // directory where sshd maintains semaphores indicating connected SGs
-	ConnectionSemRE       = "sem.(" + SernoBareRE + ")"                                                        // regular expression for matching SG semaphores (capture group is serno)
-	CryptoAuthKeysPath    = CryptoKeyPath + "/authorized_keys"                                                 // sshd authorized_keys file for remote SGs
-	CryptoKeyPath         = "/home/sg_remote/.ssh"                                                             // where crypto keys for remote SGs are stored
-	MotusControlPath      = "/home/sg_remote/sgdata.ssh"                                                       // control path for multiplexing port mappings to sgdata.motus.org
-	MotusAuthUser         = `https://motus.org/api/user/validate?json={"date":"%s","login":"%s","pword":"%s"}` // URL to validate motus user and return authorizations
-	MotusGetProjectsUrlT  = `https://motus.org/api/projects?json={"date":"%s"}`                                // URL for motus info on projects
-	MotusGetReceiversUrlT = `https://motus.org/api/receivers/deployments?json={"date":"%s","status":2}`        // URL for motus info on receivers
-	MotusMinLatency       = 10                                                                                 // minimum time (minutes) between queries to the motus metadata server
-	MotusSyncTemplate     = "/sgm_local/sync/method=%d,serno=%s"                                               // template for file touched on sgdata.motus.org to cause sync; %d=port, %s=serno
-	MotusSSHUserKey       = "/home/sg_remote/.ssh/id_ed25519_sgorg_sgdata"                                     // ssh key to use for sync on sgdata.motus.org
-	MotusSSHUser          = "sg@sgdata.motus.org"                                                              // user on sgdata.motus.org; this is who ssh makes us be
-	ProxyLoginPath        = "/sgsrvlogin"                                                                      // path to login to direct.sensorgnome.org; must not be a valid path for an SG's own webserver
-	SernoBareRE           = "(?i)(SG-)?[0-9A-Za-z]{12}(_[0-9])?"                                                  // regular expression matching SG serial number anywhere
-	SernoRE               = "^" + SernoBareRE                                                                  // regular expression matching SG serial number at start of target
-	SessionKeepAlive      = time.Minute * 1                                                                    // how long before an unused direct connection to an SG can be bumped by another user
-	SGDBFile              = "/home/sg_remote/sg_remote.sqlite"                                                 // sqlite database with receiver info
-	SGUser                = "bone"                                                                             // username for logging into remote SG; trivial, but remote SG only allows login via ssh from its local domain
-	SGPassword            = "bone"                                                                             // password for logging into remote SG
-	ShortTimestampFormat  = "Jan 2 '06 15:04"                                                                     // timestamp format for sync times etc. on status page
+	AddressTrustedStream  = "localhost:" + TrustedStreamPort                                                    // TCP interface:port on which we receive messages from trusted sources (e.g. SGs connected via ssh)
+	AddressUntrustedDgram = ":59022"                                                                            // UDP interface:port on which we receive messages from untrusted sources
+	AddressRevProxy       = "localhost:59027"                                                                   // TCP interface:port for direct connections to SG web servers
+	ConnectionSemPath     = "/dev/shm"                                                                          // directory where sshd maintains semaphores indicating connected SGs
+	ConnectionSemRE       = "sem.(" + SernoBareRE + ")"                                                         // regular expression for matching SG semaphores (capture group is serno)
+	CryptoAuthKeysPath    = CryptoKeyPath + "/authorized_keys"                                                  // sshd authorized_keys file for remote SGs
+	CryptoKeyPath         = "/home/sg_remote/.ssh"                                                              // where crypto keys for remote SGs are stored
+	MotusControlPath      = "/home/sg_remote/sgdata.ssh"                                                        // control path for multiplexing port mappings to sgdata.motus.org
+	MotusAuthUser         = `https://motus.org/api/user/validate?json={"date":"%s","login":"%s","pword":"%s"}`  // URL to validate motus user and return authorizations
+	MotusGetProjectsUrlT  = `https://motus.org/api/projects?json={"date":"%s"}`                                 // URL for motus info on projects
+	MotusGetReceiversUrlT = `https://motus.org/api/receivers?json={"date":"%s","status":2}`                     // URL for motus info on receivers
+	MotusMinLatency       = 10                                                                                  // minimum time (minutes) between queries to the motus metadata server
+	MotusSyncTemplate     = "/sgm_local/sync/method=%d,serno=%s"                                                // template for file touched on sgdata.motus.org to cause sync; %d=port, %s=serno
+	MotusSSHUserKey       = "/home/sg_remote/.ssh/id_ed25519_sgorg_sgdata"                                      // ssh key to use for sync on sgdata.motus.org
+	MotusSSHUser          = "sg@sgdata.motus.org"                                                               // user on sgdata.motus.org; this is who ssh makes us be
+	ProxyLoginPath        = "/sgsrvlogin"                                                                       // path to login to direct.sensorgnome.org; must not be a valid path for an SG's own webserver
+	SernoBareRE           = "(?i)(SG-)?[0-9A-Za-z]{12}(_[0-9])?"                                                // regular expression matching SG serial number anywhere
+	SernoRE               = "^" + SernoBareRE                                                                   // regular expression matching SG serial number at start of target
+	SessionKeepAlive      = time.Minute * 1                                                                     // how long before an unused direct connection to an SG can be bumped by another user
+	SGDBFile              = "/home/sg_remote/sg_remote.sqlite"                                                  // sqlite database with receiver info
+	SGUser                = "bone"                                                                              // username for logging into remote SG; trivial, but remote SG only allows login via ssh from its local domain
+	SGPassword            = "bone"                                                                              // password for logging into remote SG
+	ShortTimestampFormat  = "Jan 2 '06 15:04"                                                                   // timestamp format for sync times etc. on status page
 	StatusPageMinLatency  = 60                                                                                  // minimum latency (seconds) between status page updates
-	StatusPagePath        = "/home/johnb/src/sensorgnome-website/content/status/index.md"                      // path to generated page (needs group write permission and ownership by sg_remote group)
-	SyncTimeDir           = "/home/sg_remote/last_sync"                                                        // directory with one file per SG; mtime is last sync time
-	SyncWaitHi            = 90                                                                                 // maximum time between syncs of a receiver (minutes)
-	SyncWaitLo            = 30                                                                                 // minimum time between syncs of a receiver (minutes)
-	TrustedIPAddrRE       = `^209\.183\.24\.36:[0-9]+$`                                                        // hard-wired trusted network address for registration; public IP address of compudata.ca test bench
-	TunnelPortMax         = 49999                                                                              // maximum SG tunnel port we assign
-	TunnelPortMin         = 40000                                                                              // minimum SG tunnel port we assign
+	StatusPagePath        = "/home/johnb/src/sensorgnome-website/content/status/index.md"                       // path to generated page (needs group write permission and ownership by sg_remote group)
+	SyncTimeDir           = "/home/sg_remote/last_sync"                                                         // directory with one file per SG; mtime is last sync time
+	SyncWaitHi            = 90                                                                                  // maximum time between syncs of a receiver (minutes)
+	SyncWaitLo            = 30                                                                                  // minimum time between syncs of a receiver (minutes)
+	TrustedIPAddrRE       = `^209\.183\.24\.36:[0-9]+$`                                                         // hard-wired trusted network address for registration; public IP address of compudata.ca test bench
+	TunnelPortMax         = 49999                                                                               // maximum SG tunnel port we assign
+	TunnelPortMin         = 40000                                                                               // minimum SG tunnel port we assign
 )
 
 // regular expression matching a trusted net.Addr.String()
